@@ -299,7 +299,7 @@ function imageHtml(alt, url, title) {
   if (!safeUrl || safeUrl.startsWith('#')) return escapeHtml(alt || '');
   const safeAlt = escapeHtml(alt || '');
   const safeTitle = title ? ` title="${escapeHtml(title)}"` : '';
-  return `<img src="${escapeHtml(safeUrl)}" alt="${safeAlt}"${safeTitle} loading="lazy" decoding="async">`;
+  return `<img class="md-image" src="${escapeHtml(safeUrl)}" alt="${safeAlt}"${safeTitle} loading="lazy" decoding="async">`;
 }
 
 function _isModelEndpointUrl(rawUrl) {

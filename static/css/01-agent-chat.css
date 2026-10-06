@@ -7199,6 +7199,15 @@ body.bg-pattern-ascii-fireflies {
       font-style: italic;
       text-align: center;
     }
+    /* Images a model writes into its reply as Markdown (e.g. the
+       generate_image link) — without this they render at natural size and
+       the message body's overflow:hidden crops them. */
+    .md-image {
+      max-width: 100%;
+      max-height: 512px;
+      height: auto;
+      border-radius: 8px;
+    }
 
     /* Setup wizard */
     .setup-wizard { padding: 16px; max-width: 500px; }
