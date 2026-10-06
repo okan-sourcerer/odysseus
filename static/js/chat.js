@@ -2247,6 +2247,11 @@ import { invalidateSettings } from './appConfig.js';
     
     let abortCtrl = null;
     let streamingTTS = false;
+    // Assigned inside the try but also read by its catch (timeout message,
+    // terminal-error fallback), so they must be declared out here — a
+    // try-scoped const/let is a ReferenceError in the catch.
+    let _isAgent = false;
+    let roundHolder = null;
     try {
       // Re-enable auto-scroll when user sends a message
       uiModule.setAutoScroll(true);
@@ -2637,7 +2642,7 @@ import { invalidateSettings } from './appConfig.js';
       currentAbort = abortCtrl;
 
 	      const _tState = Storage.loadToggleState();
-	      const _isAgent = (_tState.mode || 'chat') === 'agent' || !!_tState.plan_mode || workspaceAgentIntent;
+	      _isAgent = (_tState.mode || 'chat') === 'agent' || !!_tState.plan_mode || workspaceAgentIntent;
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
@@ -2843,7 +2848,7 @@ import { invalidateSettings } from './appConfig.js';
       streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
-      let roundHolder = holder;       // Current AI text bubble (changes per round)
+      roundHolder = holder;           // Current AI text bubble (changes per round)
       let roundText = '';             // Text accumulated for current round
       let roundReplyText = null;      // Reply-only text after a thinking transition
       let currentToolBubble = null;   // Current tool execution bubble
