@@ -173,3 +173,65 @@ class TestThinkSuppression:
         )
         assert "think" not in payload
         assert payload["max_tokens"] == llm_core.LLMConfig.DEFAULT_MAX_TOKENS
+
+# ---------------------------------------------------------------------------
+# llm_call_async (non-streaming utility calls: chat titles, memory extraction)
+# ---------------------------------------------------------------------------
+
+class _FakeJsonResp:
+    status_code = 200
+    is_success = True
+    text = ""
+
+    def json(self):
+        return {"choices": [{"message": {"content": "A Short Title"}}]}
+
+
+class _FakePostClient:
+    def __init__(self):
+        self.captured_payload = {}
+
+    async def post(self, url, headers=None, json=None, **kw):
+        self.captured_payload = json or {}
+        return _FakeJsonResp()
+
+
+def _capture_call_payload(monkeypatch, url, model):
+    """Run llm_call_async, intercept the HTTP payload, and return it."""
+    client = _FakePostClient()
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: client)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda u: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *a, **k: None)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *a, **k: None)
+    monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+
+    asyncio.run(llm_core.llm_call_async(
+        url, model, [{"role": "user", "content": "title this"}], max_tokens=64,
+    ))
+    return client.captured_payload
+
+
+class TestUtilityCallThinkSuppression:
+    """Current Ollama ignores ``think`` on /v1 and only honours
+    ``reasoning_effort``; without it a chat-title call reasoned for minutes on
+    a small GPU and blocked the single local model slot."""
+
+    def test_reasoning_effort_none_for_ollama_v1_thinking_model(self, monkeypatch):
+        payload = _capture_call_payload(
+            monkeypatch, "http://127.0.0.1:11434/v1/chat/completions", "qwen3.5:9b"
+        )
+        assert payload.get("think") is False
+        assert payload.get("reasoning_effort") == "none"
+
+    def test_no_reasoning_effort_for_ollama_v1_non_thinking_model(self, monkeypatch):
+        payload = _capture_call_payload(
+            monkeypatch, "http://127.0.0.1:11434/v1/chat/completions", "llama3.2:3b"
+        )
+        assert "think" not in payload
+        assert "reasoning_effort" not in payload
+
+    def test_no_reasoning_effort_for_cloud_endpoint(self, monkeypatch):
+        payload = _capture_call_payload(
+            monkeypatch, "https://api.openai.com/v1/chat/completions", "qwen3:14b"
+        )
+        assert "reasoning_effort" not in payload

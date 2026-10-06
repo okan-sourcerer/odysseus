@@ -2725,12 +2725,18 @@ async def llm_call_async(
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
+        # Current Ollama ignores "think" on /v1 and only honours
+        # reasoning_effort there, so send both: without it, a short utility
+        # call (chat title, memory extraction) reasons for minutes on a small
+        # GPU, times out, retries, and holds the only local model slot while
+        # the user's next message waits behind it.
         if (
             _is_ollama_openai_compat_url(url)
             and _supports_thinking(model)
             and not _is_odysseus_qwen_tool_router_model(model)
         ):
             payload["think"] = False
+            payload["reasoning_effort"] = "none"
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         _apply_local_cache_affinity(payload, url, session_id)
