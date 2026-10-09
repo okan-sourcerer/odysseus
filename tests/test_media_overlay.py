@@ -30,3 +30,13 @@ def test_media_service_shares_the_gpu_on_demand():
 def test_dockerfile_runs_the_repo_server_script():
     assert "COPY --chown=media scripts/diffusion_server.py /app/diffusion_server.py" in DOCKERFILE
     assert 'ENTRYPOINT ["python", "/app/diffusion_server.py"]' in DOCKERFILE
+
+
+def test_tts_service_runs_the_repo_tts_server():
+    tts = OVERLAY["services"]["tts"]
+    tts_server = (ROOT / "scripts" / "tts_server.py").read_text(encoding="utf-8")
+    flags = {re.match(r"(--[a-z-]+)", arg).group(1) for arg in tts["command"]}
+    assert not sorted(f for f in flags if f'"{f}"' not in tts_server)
+    assert "ports" not in tts  # reachable on the compose network only
+    dockerfile = (ROOT / "docker" / "tts" / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY --chown=tts scripts/tts_server.py /app/tts_server.py" in dockerfile
