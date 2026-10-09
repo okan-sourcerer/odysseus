@@ -24,8 +24,24 @@ export async function initTtsSettings() {
   function getModel() { return isEndpoint() ? modelSelect.value : modelInput.value; }
   function getVoice() { return isEndpoint() ? voiceSelect.value : voiceInput.value; }
 
+  // Endpoint providers offer their own TTS models; OpenAI's names are only a
+  // fallback for endpoints that do not list any.
+  var endpointModels = {};
+  var defaultModelOptions = Array.from(modelSelect.options).map(o => [o.value, o.textContent]);
+  function fillModelOptions() {
+    var models = isEndpoint() ? (endpointModels[provSel.value.slice('endpoint:'.length)] || []) : [];
+    var options = models.length ? models.map(m => [m, m]) : defaultModelOptions;
+    var current = modelSelect.value;
+    modelSelect.innerHTML = '';
+    options.forEach(function(pair) {
+      var opt = document.createElement('option'); opt.value = pair[0]; opt.textContent = pair[1]; modelSelect.appendChild(opt);
+    });
+    if (options.some(pair => pair[0] === current)) modelSelect.value = current;
+  }
+
   function updateVisibility() {
     var prov = provSel.value;
+    fillModelOptions();
     modelRow.style.display = prov.startsWith('endpoint:') ? 'flex' : 'none';
     voiceRow.style.display = prov === 'disabled' ? 'none' : 'flex';
     speedRow.style.display = prov === 'disabled' ? 'none' : 'flex';
@@ -44,8 +60,9 @@ export async function initTtsSettings() {
     var endpoints = await epRes.json();
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled) return;
-      var hasTTS = (ep.models || []).some(m => ttsKeywords.some(kw => m.toLowerCase().includes(kw)));
-      if (!hasTTS) return;
+      var ttsModels = (ep.models || []).filter(m => ttsKeywords.some(kw => m.toLowerCase().includes(kw)));
+      if (!ttsModels.length) return;
+      endpointModels[ep.id] = ttsModels;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
     });
   } catch (e) { console.warn('Failed to load endpoints for TTS', e); }
@@ -54,6 +71,7 @@ export async function initTtsSettings() {
     var settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await settingsRes.json();
     if (settings.tts_provider) provSel.value = settings.tts_provider;
+    fillModelOptions();
     if (settings.tts_model) { modelSelect.value = settings.tts_model; modelInput.value = settings.tts_model; }
     if (settings.tts_voice) { voiceSelect.value = settings.tts_voice; voiceInput.value = settings.tts_voice; }
     if (settings.tts_speed) { speedSelect.value = settings.tts_speed; }
