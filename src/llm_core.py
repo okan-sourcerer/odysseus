@@ -3008,13 +3008,18 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
         # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
-        # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
+        # <think> blocks -- unless this chat's Thinking switch is on. Current
+        # Ollama ignores "think" on /v1 and only honours reasoning_effort, and
+        # it ignores chat_template_kwargs, so _apply_local_qwen_thinking_mode
+        # alone cannot switch reasoning on or off there.
         if (
             _is_ollama_openai_compat_url(url)
             and _supports_thinking(model)
             and not _is_odysseus_qwen_tool_router_model(model)
+            and _normalize_thinking_mode(thinking_mode) != "on"
         ):
             payload["think"] = False
+            payload["reasoning_effort"] = "none"
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
         _apply_local_qwen_thinking_mode(payload, target_url, model, thinking_mode)

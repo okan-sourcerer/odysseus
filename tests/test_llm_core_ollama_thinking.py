@@ -49,7 +49,7 @@ class _FakeClient:
         return _FakeStreamCtx(self.captured_payload)
 
 
-def _capture_payload(monkeypatch, url, model):
+def _capture_payload(monkeypatch, url, model, **stream_kwargs):
     """Run stream_llm, intercept the HTTP payload, and return it."""
     client = _FakeClient()
     monkeypatch.setattr(llm_core, "_get_http_client", lambda: client)
@@ -60,7 +60,7 @@ def _capture_payload(monkeypatch, url, model):
 
     async def run():
         return [c async for c in llm_core.stream_llm(
-            url, model, [{"role": "user", "content": "hi"}],
+            url, model, [{"role": "user", "content": "hi"}], **stream_kwargs,
         )]
 
     asyncio.run(run())
@@ -235,3 +235,30 @@ class TestUtilityCallThinkSuppression:
             monkeypatch, "https://api.openai.com/v1/chat/completions", "qwen3:14b"
         )
         assert "reasoning_effort" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Per-chat Thinking switch (session thinking_mode) on Ollama /v1
+# ---------------------------------------------------------------------------
+
+class TestThinkingModeOnOllamaV1:
+    """Ollama /v1 ignores ``think`` and ``chat_template_kwargs``; only
+    ``reasoning_effort`` switches reasoning, so the chat's Thinking switch
+    must decide whether it is sent."""
+
+    URL = "http://127.0.0.1:11434/v1/chat/completions"
+
+    def test_thinking_on_lets_the_model_think(self, monkeypatch):
+        payload = _capture_payload(monkeypatch, self.URL, "qwen3.5:9b", thinking_mode="on")
+        assert "think" not in payload
+        assert payload.get("reasoning_effort") != "none"
+
+    def test_thinking_off_suppresses_thinking(self, monkeypatch):
+        payload = _capture_payload(monkeypatch, self.URL, "qwen3.5:9b", thinking_mode="off")
+        assert payload.get("think") is False
+        assert payload.get("reasoning_effort") == "none"
+
+    def test_no_thinking_mode_keeps_the_suppression_default(self, monkeypatch):
+        payload = _capture_payload(monkeypatch, self.URL, "qwen3.5:9b")
+        assert payload.get("think") is False
+        assert payload.get("reasoning_effort") == "none"
