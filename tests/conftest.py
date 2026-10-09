@@ -330,6 +330,10 @@ def _no_context_window_network_probe(request):
             ledger.append({"url": url, "headers": dict(headers or {})})
             raise context_resolution.httpx.ConnectError("network disabled in tests")
 
+        async def post(self, url, headers=None, json=None):
+            ledger.append({"url": url, "headers": dict(headers or {})})
+            raise context_resolution.httpx.ConnectError("network disabled in tests")
+
     def _offline_provider_urls(endpoint_url):
         base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rstrip("/")
         return base + "/v1/models", endpoint_url

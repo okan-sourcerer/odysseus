@@ -7,6 +7,7 @@ Provides token estimation for context usage tracking.
 
 import ipaddress
 import logging
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -247,7 +248,9 @@ def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool
     """Return (context_length, known). ``known`` is False only when the value is a
     bare DEFAULT_CONTEXT fallback (no endpoint report and not in the known table)."""
     configured_kind = _configured_endpoint_kind(endpoint_url)
-    is_local = is_local_endpoint(endpoint_url)
+    # A local Ollama reloads models with other windows; never pin its answer,
+    # even when the endpoint is stored as endpoint_kind="api".
+    is_local = is_local_endpoint(endpoint_url) or is_local_ollama_endpoint(endpoint_url, configured_kind)
     # Key on (endpoint_url, model): the same model id can be served by two
     # different remote endpoints with different real context windows (e.g. a
     # capped proxy vs. the full provider), so caching by model id alone would
@@ -349,6 +352,202 @@ def _model_ctx_from_entry(m: dict) -> Optional[int]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Ollama: the window the server actually serves
+# ---------------------------------------------------------------------------
+# Ollama's OpenAI-compatible /v1/models lists no context window, and the
+# window it serves comes from OLLAMA_CONTEXT_LENGTH or a Modelfile num_ctx,
+# not from the model name: qwen3.5:9b matched the "qwen3" table key (131072)
+# while Ollama served 4096, so prompts were truncated from the front and
+# replies cut off mid-sentence. Its native API reports the real value.
+
+OLLAMA_DEFAULT_PORT = 11434
+_OLLAMA_SURFACE_RE = re.compile(r"/(?:v1|api)(?:/|$)")
+_OLLAMA_NUM_CTX_RE = re.compile(r"^\s*num_ctx\s+(\d+)\s*$", re.MULTILINE)
+
+
+def ollama_api_root(endpoint_url: str) -> str:
+    """Server root of an Ollama endpoint URL (the part before /v1 or /api)."""
+    parsed = urlparse(endpoint_url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    path = (parsed.path or "").rstrip("/")
+    match = _OLLAMA_SURFACE_RE.search(path)
+    prefix = path[:match.start()] if match else path
+    return f"{parsed.scheme}://{parsed.netloc}{prefix}"
+
+
+def looks_like_ollama(endpoint_url: str) -> bool:
+    """Ollama endpoint by URL, the same rule routes/model_routes.py applies."""
+    try:
+        parsed = urlparse(endpoint_url or "")
+        port = parsed.port
+    except ValueError:
+        return False
+    return port == OLLAMA_DEFAULT_PORT or "ollama" in (parsed.hostname or "").lower()
+
+
+_KIND_UNSET = object()
+
+
+def is_local_ollama_endpoint(endpoint_url: str, configured_kind=_KIND_UNSET) -> bool:
+    """An Ollama endpoint whose own API reports the window it serves.
+
+    Covers local, private-network and Tailscale hosts, a Docker service name
+    such as ``ollama`` (single label), and endpoints marked "local". Manually
+    added endpoints are often stored as endpoint_kind="api" even when they
+    point at a local Ollama, so that kind does not exclude it; "proxy" does.
+    """
+    if configured_kind is _KIND_UNSET:
+        configured_kind = _configured_endpoint_kind(endpoint_url)
+    if configured_kind == "proxy" or not looks_like_ollama(endpoint_url):
+        return False
+    if configured_kind == "local":
+        return True
+    try:
+        host = (urlparse(endpoint_url).hostname or "").lower()
+    except ValueError:
+        return False
+    return (
+        host in _LOCAL_HOSTS
+        or _is_private_ip_literal(host)
+        or _in_tailscale_range(host)
+        or ("." not in host and "ollama" in host)
+    )
+
+
+def _ollama_names(model: str) -> set:
+    name = (model or "").strip().lower()
+    if not name:
+        return set()
+    # Ollama reports untagged models as "<name>:latest".
+    last = name.rsplit("/", 1)[-1]
+    if ":" not in last:
+        return {name, name + ":latest"}
+    if name.endswith(":latest"):
+        return {name, name[: -len(":latest")]}
+    return {name}
+
+
+def ollama_ps_context(payload, model: str) -> Tuple[bool, int]:
+    """Parse an Ollama ``/api/ps`` response.
+
+    Returns ``(is_ollama, context_length)``: whether the payload is an Ollama
+    process list at all, and the serving window of ``model`` when it is
+    loaded (0 when it is not).
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return False, 0
+    wanted = _ollama_names(model)
+    for entry in payload["models"]:
+        if not isinstance(entry, dict):
+            continue
+        names = {str(entry.get(key) or "").lower() for key in ("name", "model")}
+        if wanted & names:
+            value = entry.get("context_length")
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                return True, int(value)
+            return True, 0
+    return True, 0
+
+
+# Last window /api/ps reported per (server root, model). Ollama unloads idle
+# models (OLLAMA_KEEP_ALIVE) and does not expose its default window, so once a
+# model has been seen loaded, that window is the best evidence of what it will
+# load with again; without it a long chat resumed after the model unloaded
+# would be budgeted against the name table again.
+_ollama_last_loaded: Dict[Tuple[str, str], int] = {}
+
+
+def remember_ollama_window(endpoint_url: str, model: str, n_ctx: int) -> None:
+    if n_ctx > 0:
+        _ollama_last_loaded[(ollama_api_root(endpoint_url), (model or "").lower())] = n_ctx
+
+
+def last_ollama_window(endpoint_url: str, model: str) -> int:
+    return _ollama_last_loaded.get((ollama_api_root(endpoint_url), (model or "").lower()), 0)
+
+
+def ollama_modelfile_num_ctx(payload) -> int:
+    """``num_ctx`` from an Ollama ``/api/show`` response, or 0.
+
+    A Modelfile num_ctx is the window Ollama loads the model with. The model's
+    trained maximum (``model_info``) is deliberately ignored: Ollama does not
+    serve it unless asked to, so it would repeat the over-estimate above.
+    """
+    if not isinstance(payload, dict):
+        return 0
+    match = _OLLAMA_NUM_CTX_RE.search(str(payload.get("parameters") or ""))
+    return int(match.group(1)) if match and int(match.group(1)) > 0 else 0
+
+
+def _query_ollama_context(endpoint_url: str, model: str) -> Tuple[bool, int]:
+    """Ask a local Ollama for the window it serves ``model`` with.
+
+    Returns ``(is_ollama, context_length)``. The loaded model's window from
+    ``/api/ps`` wins; when the model is not loaded, a Modelfile ``num_ctx``
+    from ``/api/show`` is the window it will load with, else the window it
+    was last seen loaded with. 0 when none is known (the server default is
+    not exposed).
+    """
+    root = ollama_api_root(endpoint_url)
+    if not root:
+        return False, 0
+    try:
+        r = httpx.get(f"{root}/api/ps", timeout=REQUEST_TIMEOUT)
+        if not r.is_success:
+            return False, 0
+        is_ollama, n_ctx = ollama_ps_context(r.json(), model)
+    except Exception:
+        return False, 0
+    if not is_ollama:
+        return False, 0
+    if n_ctx:
+        logger.info(f"Ollama /api/ps reports context_length={n_ctx} for {model}")
+        remember_ollama_window(endpoint_url, model, n_ctx)
+        return True, n_ctx
+    try:
+        r = httpx.post(f"{root}/api/show", json={"model": model}, timeout=REQUEST_TIMEOUT)
+        n_ctx = ollama_modelfile_num_ctx(r.json()) if r.is_success else 0
+    except Exception:
+        n_ctx = 0
+    if n_ctx:
+        logger.info(f"Ollama Modelfile sets num_ctx={n_ctx} for {model}")
+        return True, n_ctx
+    return True, last_ollama_window(endpoint_url, model)
+
+
+def _query_llamacpp_context(endpoint_url: str, model: str) -> int:
+    """Active serving window from llama.cpp ``/slots`` or ``/props``, or 0."""
+    base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rsplit("/", 1)[0]
+    try:
+        r = httpx.get(f"{base}/slots", timeout=REQUEST_TIMEOUT)
+        if r.is_success:
+            slots = r.json()
+            if isinstance(slots, list) and slots:
+                n_ctx = slots[0].get("n_ctx")
+                if n_ctx and isinstance(n_ctx, int) and n_ctx > 0:
+                    logger.info(f"llama.cpp /slots reports n_ctx={n_ctx} for {model}")
+                    return n_ctx
+    except Exception:
+        pass
+    # llama-server only exposes /slots when started with --slots. Its
+    # /props endpoint still reports the active serving context, and is the
+    # authoritative value for single-slot servers.
+    try:
+        r = httpx.get(f"{base}/props", timeout=REQUEST_TIMEOUT)
+        if r.is_success:
+            props = r.json()
+            generation = props.get("default_generation_settings") if isinstance(props, dict) else None
+            n_ctx = generation.get("n_ctx") if isinstance(generation, dict) else None
+            if n_ctx and isinstance(n_ctx, (int, float)) and n_ctx > 0:
+                logger.info(f"llama.cpp /props reports n_ctx={int(n_ctx)} for {model}")
+                return int(n_ctx)
+    except Exception:
+        pass
+    return 0
+
+
 # Per-endpoint cache of the {model_id: context_length} map parsed from a
 # proxy/api catalog. api/proxy endpoints skip the /models download on every
 # lookup because a large catalog is expensive; caching the whole map lets us
@@ -405,6 +604,14 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     api_ctx = None
     configured_kind = _configured_endpoint_kind(endpoint_url)
 
+    # A local Ollama's own report of its serving window beats every guess,
+    # including for endpoints stored as endpoint_kind="api" (issue #5193).
+    is_ollama = False
+    if is_local_ollama_endpoint(endpoint_url, configured_kind):
+        is_ollama, n_ctx = _query_ollama_context(endpoint_url, model)
+        if n_ctx:
+            return n_ctx, True
+
     # Large OpenAI-compatible proxies can make /models expensive. If the
     # endpoint is explicitly configured as API/proxy, prefer known context
     # metadata (or the default) over downloading the full catalog.
@@ -422,34 +629,11 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
             return api_ctx, True
         return DEFAULT_CONTEXT, False
 
-    # Try llama.cpp /slots endpoint first — reports actual serving context
-    if is_local_endpoint(endpoint_url):
-        base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rsplit("/", 1)[0]
-        try:
-            r = httpx.get(f"{base}/slots", timeout=REQUEST_TIMEOUT)
-            if r.is_success:
-                slots = r.json()
-                if isinstance(slots, list) and slots:
-                    n_ctx = slots[0].get("n_ctx")
-                    if n_ctx and isinstance(n_ctx, int) and n_ctx > 0:
-                        logger.info(f"llama.cpp /slots reports n_ctx={n_ctx} for {model}")
-                        return n_ctx, True
-        except Exception:
-            pass
-        # llama-server only exposes /slots when started with --slots. Its
-        # /props endpoint still reports the active serving context, and is the
-        # authoritative value for single-slot servers.
-        try:
-            r = httpx.get(f"{base}/props", timeout=REQUEST_TIMEOUT)
-            if r.is_success:
-                props = r.json()
-                generation = props.get("default_generation_settings") if isinstance(props, dict) else None
-                n_ctx = generation.get("n_ctx") if isinstance(generation, dict) else None
-                if n_ctx and isinstance(n_ctx, (int, float)) and n_ctx > 0:
-                    logger.info(f"llama.cpp /props reports n_ctx={int(n_ctx)} for {model}")
-                    return int(n_ctx), True
-        except Exception:
-            pass
+    # A local llama.cpp server's own report of its serving window, likewise.
+    if not is_ollama and is_local_endpoint(endpoint_url):
+        n_ctx = _query_llamacpp_context(endpoint_url, model)
+        if n_ctx:
+            return n_ctx, True
 
     # GitHub Copilot's /models requires auth + X-GitHub-Api-Version headers that
     # aren't available here; an unauthenticated probe just 400s. All Copilot
