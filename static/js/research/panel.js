@@ -5,6 +5,7 @@ import * as jobs from './jobs.js?v=20260910researcherrorpersist1';
 import themeModule from '../theme.js?v=20260911organsrain1';
 import createResearchSynapse from '../researchSynapse.js?v=20260910roundlabels2';
 import spinnerModule from '../spinner.js';
+import { showError } from '../ui.js?v=20260916largetoolscroll1';
 import { sortModelIds } from '../modelSort.js';
 import { searchProviderLogo } from '../searchProviderIcons.js';
 import { orderActionMenuItems, actionMenuRank, SELECT_MENU_ICON } from '../actionMenuOrder.js';
@@ -757,15 +758,11 @@ async function _handleStart() {
     jobs.removeJob(job.id);
     queryEl.value = query;
     _setResearchTab('research');
-    if (typeof uiModule !== 'undefined' && uiModule?.showError) {
-      uiModule.showError(`Research did not start: ${detail}`);
-    }
+    showError(`Research did not start: ${detail}`);
   }).catch((e) => {
     queryEl.value = query;
     _setResearchTab('research');
-    if (typeof uiModule !== 'undefined' && uiModule?.showError) {
-      uiModule.showError(`Research did not start: ${e?.message || 'Unable to start research.'}`);
-    }
+    showError(`Research did not start: ${e?.message || 'Unable to start research.'}`);
   });
 }
 

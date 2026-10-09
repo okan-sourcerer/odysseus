@@ -7347,7 +7347,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       }
     } catch (_) {}
     if (!document.getElementById('notes-pane') && !document.getElementById('notes-pane-backdrop')) return;
-    import('./notes.js?v=20260911notesselectioncancel1')
+    import('./notes.js?v=20261009local3')
       .then(mod => {
         const close = mod.closeNotes || mod.closePanel || mod.default?.closeNotes || mod.default?.closePanel;
         if (typeof close === 'function') close('down');
