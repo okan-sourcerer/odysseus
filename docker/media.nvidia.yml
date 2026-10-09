@@ -53,5 +53,39 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  # Text-to-speech for Odysseus' read-aloud (add an endpoint for
+  # http://tts:8200/v1 and pick it as the TTS provider). model "auto" sends
+  # Turkish text to Chatterbox Multilingual and everything else to Kokoro.
+  # Kokoro runs on the CPU; Chatterbox uses free GPU memory (else the CPU) and
+  # never evicts the chat model, since read-aloud runs while it streams.
+  # Put <name>.wav reference clips in TTS_VOICES_DIR to clone a voice.
+  tts:
+    build:
+      context: .
+      dockerfile: docker/tts/Dockerfile
+    image: ${TTS_IMAGE:-odysseus-tts:local}
+    command:
+      - --host=0.0.0.0
+      - --port=8200
+      - --idle-unload=${TTS_IDLE_UNLOAD:-300}
+      - --chatterbox-cfg=${TTS_CHATTERBOX_CFG:-0.3}
+      - --warm-kokoro
+    volumes:
+      - tts-hf:/hf
+      - ${TTS_VOICES_DIR:-tts-voices}:/voices:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
 volumes:
   media-models:
+  tts-hf:
+  tts-voices:
