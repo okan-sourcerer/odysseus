@@ -1145,8 +1145,8 @@
                    #research-toggle checkbox is kept inert so existing JS refs
                    don't break; without this entry point it can't be enabled. -->
               <!-- Group Chat moved to Characters modal Group tab -->
-              <!-- TTS Mode hidden — read-aloud feature is off in this build. -->
-              <button type="button" class="overflow-menu-item" id="overflow-tts-btn" hidden style="display:none">
+              <!-- TTS Mode: app.js shows it once a TTS provider is configured. -->
+              <button type="button" class="overflow-menu-item" id="overflow-tts-btn" style="display:none">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
                 <span>TTS Mode</span>
                 <span class="overflow-active-dot"></span>
@@ -1666,10 +1666,7 @@
               <div id="set-imgSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
-          <!-- TTS panel hidden — user opted out of read-aloud entirely. Kept
-               in DOM so the JS that wires set-ttsProviderSelect etc. doesn't
-               throw on missing nodes; not visible to anyone. -->
-          <div class="admin-card" hidden style="display:none">
+          <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>Text to Speech<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-ttsEnabledToggle" checked><span class="admin-slider"></span></label></h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Configure TTS provider for assistant message read-aloud.</div>
             <div style="display:flex;flex-direction:column;gap:0.5rem;">
@@ -1678,7 +1675,8 @@
                 <select id="set-ttsProviderSelect" class="settings-select">
                   <option value="disabled">Disabled</option>
                   <option value="browser">Browser (built-in)</option>
-                  <option value="local">Local (Kokoro-82M)</option>
+                  <!-- Local voices come from an endpoint (e.g. the media stack's
+                       tts service); speech.js appends one option per endpoint. -->
                 </select>
               </div>
               <div id="set-ttsModelRow" style="display:flex;align-items:center;gap:0.75rem;">

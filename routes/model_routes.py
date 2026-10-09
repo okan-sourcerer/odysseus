@@ -1706,9 +1706,13 @@ def setup_model_routes(model_discovery):
             from src.chatgpt_subscription import is_chatgpt_subscription_base
             if is_chatgpt_subscription_base(ep.base_url or "") and (ep.owner or None) != (owner or None):
                 continue
+            ep_model_type = getattr(ep, "model_type", None) or "llm"
+            # Text-to-speech endpoints serve read-aloud (Settings -> Text to
+            # Speech lists them from /api/model-endpoints); they cannot chat.
+            if ep_model_type == "tts":
+                continue
             base = _normalize_base(ep.base_url)
             provider = _safe_detect_provider(base)
-            ep_model_type = getattr(ep, "model_type", None) or "llm"
             # Build correct URL based on provider
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
