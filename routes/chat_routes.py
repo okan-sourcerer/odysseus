@@ -36,6 +36,7 @@ from src.model_context import estimate_tokens
 from src.context_compactor import (
     apply_compaction_state,
     maybe_compact,
+    record_prompt_overhead,
     trim_for_context,
 )
 from src.chat_helpers import coerce_message_and_session
@@ -3758,6 +3759,18 @@ def setup_chat_routes(
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
+
+            def _note_prompt_overhead(metrics):
+                # Lets auto-compaction count what each request carries beyond
+                # the conversation (system prompt, tools, injected context).
+                try:
+                    record_prompt_overhead(
+                        session,
+                        metrics.get("request_context_tokens") or metrics.get("input_tokens") or 0,
+                        estimate_tokens(ctx.messages),
+                    )
+                except Exception:
+                    logger.debug("Could not record prompt overhead", exc_info=True)
             web_sources = ctx.web_sources
 
             # Register active stream for partial-save safety net
@@ -4239,6 +4252,7 @@ def setup_chat_routes(
                                     # Wall-clock response time for the stats popup ("Time").
                                     last_metrics.setdefault("response_time", round(time.time() - _chat_start, 2))
                                     _annotate_chat_cost(last_metrics, sess)
+                                    _note_prompt_overhead(last_metrics)
                                     yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             except json.JSONDecodeError:
                                 yield chunk
@@ -4385,6 +4399,7 @@ def setup_chat_routes(
                                         "endpoint_cost_tracked"
                                     )
                                 _annotate_chat_cost(last_metrics, sess)
+                                _note_prompt_overhead(last_metrics)
                                 yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             if full_response:
                                 _commit_chat_compaction(_actual_candidate_index)
@@ -4724,6 +4739,7 @@ def setup_chat_routes(
                                         last_metrics["context_messages_after_trim"] = ctx.context_messages_after_trim
                                         last_metrics["context_tokens_before_trim"] = ctx.context_tokens_before_trim
                                         last_metrics["context_tokens_after_trim"] = ctx.context_tokens_after_trim
+                                    _note_prompt_overhead(last_metrics)
                                     _metrics_event = {"type": "metrics", "data": last_metrics}
                                     # Inline teacher escalation marks its
                                     # recursively emitted events at the SSE
