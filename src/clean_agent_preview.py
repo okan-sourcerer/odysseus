@@ -5157,10 +5157,15 @@ async def preview_model_response(client, endpoint_url, headers, request, recover
                 request['messages'], max(1, int(message_context * recovery.get('scale', 1))),
                 reserve_tokens=request['max_tokens'] + context_safety_margin(limit))
         # Server-only provenance guides trimming, not the model's wire schema.
+        # A per-model context window on a local Ollama's /v1 is applied by
+        # sending a derived model (see src/ollama_context_variants.py).
+        from src.ollama_context_variants import served_model_async
         provider_request = {
             **request,
             'messages': provider_wire_messages(request['messages']),
         }
+        if request.get('model'):
+            provider_request['model'] = await served_model_async(endpoint_url, request['model'])
         response_started = False
         try:
             async with client.stream(

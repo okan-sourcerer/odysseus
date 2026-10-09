@@ -11,7 +11,8 @@ Evidence classes are kept apart instead of being folded into one "known" flag:
   or rejected a request of this turn with an explicit limit.
 * ``provider_advertised``: the provider's model catalog lists a window, or an
   Ollama Modelfile sets the ``num_ctx`` a not-yet-loaded model will load with.
-* ``operator_declared``: the client or operator declared a transport window.
+* ``operator_declared``: the client or operator declared a transport window,
+  or the admin set a context window for the model in Settings.
   It caps runtime or provider evidence and replaces weaker evidence.
 * ``known_table``: the static ``KNOWN_CONTEXT_WINDOWS`` fallback.
 * ``unknown``: nothing above is available. The value is 0, never a default.
@@ -536,6 +537,24 @@ async def _is_local_ollama(endpoint_url: str) -> bool:
         return False
 
 
+def _model_setting(endpoint_url: str, model: str) -> tuple[int, bool]:
+    """``(window, controlled)`` from the model's Settings entry.
+
+    ``controlled`` is True where Odysseus makes the server load the model with
+    that window (a local Ollama); elsewhere the setting only caps it. Reads
+    configured endpoints on the calling thread, as ``_is_local`` does.
+    """
+    if not endpoint_url or not model:
+        return 0, False
+    from src.model_context import configured_context_window, controls_ollama_window
+
+    try:
+        configured = configured_context_window(endpoint_url, model)
+        return configured, bool(configured) and controls_ollama_window(endpoint_url, model, configured)
+    except Exception:
+        return 0, False
+
+
 def declared_context_window(client_runtime_context: Any) -> int:
     """Operator/client declared transport window, or 0."""
     if not isinstance(client_runtime_context, Mapping):
@@ -563,7 +582,10 @@ async def resolve_effective_context(
     observations: list[ContextObservation] = []
     errors: tuple[str, ...] = ()
     provider_io = cached = False
-    if probe and endpoint_url and model:
+    configured, controlled = _model_setting(endpoint_url, model)
+    # Where Odysseus sets the window itself (a local Ollama), the server's
+    # current report describes whatever was loaded before, not this turn.
+    if probe and endpoint_url and model and not controlled:
         result, cached = await _cached_probe(
             endpoint_url, model, headers, deadline_seconds, clock,
         )
@@ -574,6 +596,10 @@ async def resolve_effective_context(
     if declared:
         observations.append(ContextObservation(
             ContextEvidence.OPERATOR_DECLARED, declared, "client_runtime_context",
+        ))
+    if configured:
+        observations.append(ContextObservation(
+            ContextEvidence.OPERATOR_DECLARED, configured, "model_setting",
         ))
     known = _lookup_known(model or "")
     if known:

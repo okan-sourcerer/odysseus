@@ -586,6 +586,10 @@ class ModelEndpoint(TimestampMixin, Base):
     # JSON object: model id -> native tool schema surface preference.
     # Values: none, compact, full. Missing key = legacy automatic behavior.
     model_tool_modes = Column(Text, nullable=True)
+    # JSON object: model id -> context window (tokens) the admin chose for it.
+    # Odysseus budgets against it, and for a local Ollama it is also the
+    # window Ollama loads the model with. Missing key = discovered window.
+    model_context_windows = Column(Text, nullable=True)
     # Per-user ownership. NULL = legacy/shared (visible to every user) — this
     # is the historical default. When non-null, the model picker only shows
     # the endpoint to that user (admins always see everything).
@@ -1302,6 +1306,30 @@ def _migrate_add_supports_tools_column():
             logging.getLogger(__name__).info("Migrated: added 'supports_tools' column to model_endpoints")
     except Exception as e:
         logging.getLogger(__name__).warning(f"supports_tools migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _migrate_add_model_context_windows_column():
+    """Add per-model context window settings to model_endpoints if missing."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "model_context_windows" not in columns:
+            conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_context_windows TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'model_context_windows' column to model_endpoints")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"model_context_windows migration failed: {e}")
     finally:
         try:
             conn.close()
@@ -2397,6 +2425,7 @@ def init_db():
     _migrate_add_provider_auth_id_column()
     _migrate_add_supports_tools_column()
     _migrate_add_model_tool_modes_column()
+    _migrate_add_model_context_windows_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()

@@ -490,6 +490,12 @@ def _normalize_model_tool_mode(value: Any) -> str:
     return mode if mode in _MODEL_TOOL_MODES else ""
 
 
+def _model_context_windows(ep: Any) -> Dict[str, int]:
+    from src.model_context import parse_context_windows
+
+    return parse_context_windows(getattr(ep, "model_context_windows", None))
+
+
 def _model_tool_modes(ep: Any) -> Dict[str, str]:
     raw = getattr(ep, "model_tool_modes", None)
     if not raw:
@@ -1010,6 +1016,21 @@ def _probe_google_models(base_url: str, api_key: str = None, timeout: int = 5, p
 
 
 def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
+    """Probe a base URL's /models endpoint and return list of model IDs.
+
+    On Ollama, the derived models Odysseus creates to apply a per-model
+    context window (``odysseus/...``) are left out: they are an
+    implementation detail of the original model's setting.
+    """
+    from src.model_context import is_ollama_context_variant, looks_like_ollama
+
+    models = _probe_endpoint_models(base_url, api_key, timeout)
+    if models and looks_like_ollama(base_url):
+        models = [m for m in models if not is_ollama_context_variant(m)]
+    return models
+
+
+def _probe_endpoint_models(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
     from src.endpoint_resolver import resolve_url
@@ -2116,6 +2137,7 @@ def setup_model_routes(model_discovery):
                     "model_type": getattr(r, "model_type", None) or "llm",
                     "supports_tools": getattr(r, "supports_tools", None),
                     "model_tool_modes": _model_tool_modes(r),
+                    "model_context_windows": _model_context_windows(r),
                     "endpoint_kind": kind,
                     "category": _classify_endpoint(base, kind),
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
@@ -2511,6 +2533,7 @@ def setup_model_routes(model_discovery):
             _, pinned = _picker_models_for_endpoint(ep, base, kind)
             pinned_set = set(pinned)
             tool_modes = _model_tool_modes(ep)
+            context_windows = _model_context_windows(ep)
             return [
                 {
                     "id": m,
@@ -2519,6 +2542,7 @@ def setup_model_routes(model_discovery):
                     "is_pinned": m in pinned_set,
                     "picker_requires_pinning": picker_requires_pinning,
                     "tool_mode": tool_modes.get(m, ""),
+                    "context_window": context_windows.get(m),
                 }
                 for m in _merge_model_ids(all_models, pinned)
             ]
@@ -2584,7 +2608,43 @@ def setup_model_routes(model_discovery):
                     else:
                         modes.pop(model_id, None)
                 ep.model_tool_modes = json.dumps(modes) if modes else None
+            replaced_windows: Dict[str, int] = {}
+            if "model_context_windows" in body:
+                from src.model_context import MAX_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW
+
+                raw_windows = body.get("model_context_windows")
+                if not isinstance(raw_windows, dict):
+                    raise HTTPException(400, "model_context_windows must be an object")
+                windows = _model_context_windows(ep)
+                for model_id, value in raw_windows.items():
+                    model_id = str(model_id or "").strip()
+                    if not model_id:
+                        continue
+                    previous = windows.get(model_id)
+                    if value in (None, "", 0):
+                        windows.pop(model_id, None)
+                    else:
+                        try:
+                            tokens = int(value)
+                        except (TypeError, ValueError):
+                            raise HTTPException(400, f"context window for {model_id} must be a number")
+                        if isinstance(value, bool) or not MIN_CONTEXT_WINDOW <= tokens <= MAX_CONTEXT_WINDOW:
+                            raise HTTPException(
+                                400,
+                                f"context window must be between {MIN_CONTEXT_WINDOW} and {MAX_CONTEXT_WINDOW} tokens",
+                            )
+                        windows[model_id] = tokens
+                    if previous and previous != windows.get(model_id):
+                        replaced_windows[model_id] = previous
+                ep.model_context_windows = json.dumps(windows) if windows else None
             db.commit()
+            if replaced_windows:
+                # Derived Ollama models of replaced windows are no longer used.
+                import asyncio as _asyncio
+                from src.ollama_context_variants import delete_variant
+
+                for model_id, previous in replaced_windows.items():
+                    await _asyncio.to_thread(delete_variant, ep.base_url, model_id, previous)
             _invalidate_models_cache()
             hidden_count = len(json.loads(ep.hidden_models)) if ep.hidden_models else 0
             pinned_count = len(json.loads(ep.pinned_models)) if ep.pinned_models else 0
@@ -2593,6 +2653,7 @@ def setup_model_routes(model_discovery):
                 "hidden_count": hidden_count,
                 "pinned_count": pinned_count,
                 "model_tool_modes": _model_tool_modes(ep),
+                "model_context_windows": _model_context_windows(ep),
             }
         finally:
             db.close()
@@ -2907,6 +2968,7 @@ def setup_model_routes(model_discovery):
                 "base_url": ep.base_url,
                 "pinned_models": _normalize_model_ids(getattr(ep, "pinned_models", None)),
                 "model_tool_modes": _model_tool_modes(ep),
+                "model_context_windows": _model_context_windows(ep),
                 "endpoint_kind": getattr(ep, "endpoint_kind", None) or "auto",
                 "model_refresh_mode": getattr(ep, "model_refresh_mode", None) or "auto",
                 "model_refresh_interval": getattr(ep, "model_refresh_interval", None),

@@ -1374,6 +1374,10 @@ async function loadEndpoints() {
                     <option value="none" ${mode === 'none' ? 'selected' : ''}>Tools off</option>
                   </select>
                 </div>
+                <div class="adm-model-tools-col adm-model-ctx-col">
+                  <span class="adm-model-tools-label" title="Context window in tokens">Context</span>
+                  <input type="number" class="adm-model-ctx" data-ep-model-id="${esc(m.id)}" data-original-ctx="${esc(m.context_window || '')}" value="${esc(m.context_window || '')}" min="512" max="2097152" step="1024" placeholder="Auto" inputmode="numeric" aria-label="Context window for ${esc(m.display)}" title="Context window in tokens. Empty uses what the server reports. On a local Ollama, Odysseus also makes Ollama load the model with this window; elsewhere it caps how much Odysseus sends.">
+                </div>
               </div>`;
             }
             ).join('') + '</div>';
@@ -1407,6 +1411,9 @@ async function loadEndpoints() {
                 sel.dataset.toolModeTouched = '1';
                 _saveEpModelState(epId, panel);
               });
+            });
+            panel.querySelectorAll('.adm-model-ctx').forEach(input => {
+              input.addEventListener('change', () => _saveEpModelState(epId, panel));
             });
           };
           try {
@@ -1443,17 +1450,35 @@ async function _saveEpModelState(epId, panel) {
       modelToolModes[modelId] = ['none', 'compact', 'full'].includes(value) ? value : '';
     }
   });
+  // Only changed context windows are sent; an empty field clears the setting.
+  const modelContextWindows = {};
+  const savedContextInputs = [];
+  panel.querySelectorAll('.adm-model-ctx').forEach(input => {
+    const modelId = input.dataset.epModelId || '';
+    const raw = String(input.value || '').trim();
+    if (!modelId || raw === String(input.dataset.originalCtx || '')) return;
+    const tokens = Number(raw);
+    const valid = raw === '' || (Number.isInteger(tokens) && tokens >= 512 && tokens <= 2097152);
+    input.setAttribute('aria-invalid', valid ? 'false' : 'true');
+    if (!valid) return;
+    modelContextWindows[modelId] = raw === '' ? null : tokens;
+    savedContextInputs.push(input);
+  });
   const total = panel.querySelectorAll('input.adm-cb-hidden[type=checkbox]').length;
   const enabled = usesPinnedPicker ? pinned.length : total - hidden.length;
   const body = usesPinnedPicker ? { pinned_models: pinned } : { hidden };
   if (Object.keys(modelToolModes).length) body.model_tool_modes = modelToolModes;
+  if (Object.keys(modelContextWindows).length) body.model_context_windows = modelContextWindows;
   try {
-    await fetch(`/api/model-endpoints/${epId}/models`, {
+    const res = await fetch(`/api/model-endpoints/${epId}/models`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify(body),
     });
+    if (res.ok) {
+      savedContextInputs.forEach(input => { input.dataset.originalCtx = String(input.value || '').trim(); });
+    }
     const row = panel.closest('[data-adm-ep-id]');
     if (row) {
       const badge = row.querySelector('.admin-badge');

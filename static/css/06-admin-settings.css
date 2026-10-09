@@ -300,6 +300,25 @@
   box-sizing: border-box;
   vertical-align: middle;
 }
+/* Per-model context window, next to the Tools select. */
+.adm-model-ctx-col {
+  margin-left: 0;
+}
+.adm-model-ctx {
+  height: 24px;
+  width: 76px;
+  font-size: 11px;
+  padding: 0 4px 0 6px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background-color: var(--select-bg);
+  color: var(--select-fg);
+  box-sizing: border-box;
+}
+.adm-model-ctx[aria-invalid="true"] {
+  border-color: var(--red);
+}
 @media (max-width: 480px) {
   .adm-model-tool-mode,
   .admin-tools-select {
@@ -307,6 +326,10 @@
     max-width: 110px;
     font-size: 10px;
     padding: 0 14px 0 4px;
+  }
+  .adm-model-ctx {
+    width: 62px;
+    font-size: 10px;
   }
 }
 .adm-model-row:hover .adm-check-dot {
