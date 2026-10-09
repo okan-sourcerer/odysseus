@@ -186,7 +186,9 @@ class TTSService:
         }
 
         try:
-            r = httpx.post(url, json=payload, headers=headers, timeout=60)
+            # Local TTS servers load their model on first use after idling
+            # (~30-50 s for Chatterbox Multilingual); 60 s cut that close.
+            r = httpx.post(url, json=payload, headers=headers, timeout=180)
             r.raise_for_status()
             logger.info(f"API TTS: {len(r.content)} bytes from {base_url}")
             return r.content
