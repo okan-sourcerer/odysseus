@@ -8,6 +8,7 @@ Summarizes older messages via the same LLM, preserving key context.
 import json
 import logging
 import re
+from collections import OrderedDict, deque
 from typing import Any, Dict, List, Optional
 
 from src.model_context import estimate_text_tokens, get_context_length, estimate_tokens
@@ -94,6 +95,54 @@ def prune_multimodal_images(
 COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
 SUMMARY_MAX_TOKENS = 1024
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
+
+
+# ---------------------------------------------------------------------------
+# Prompt overhead
+# ---------------------------------------------------------------------------
+# maybe_compact sees the conversation, but each request also carries what is
+# assembled around it afterwards: the agent system prompt, tool schemas,
+# memory/skill/date context (~7k tokens for Odysseus on a local model). Judged
+# on the conversation alone, auto-compaction triggered too late: the final
+# request trim then dropped the oldest messages instead of a summary keeping
+# them. The overhead is measured after each reply (assembled request minus
+# conversation) and added to the threshold check.
+
+_OVERHEAD_SAMPLES = 5
+_OVERHEAD_SESSIONS = 1000
+_prompt_overhead: "OrderedDict[str, deque]" = OrderedDict()
+_last_prompt_overhead = 0
+
+
+def record_prompt_overhead(session_id: Optional[str], request_tokens, conversation_tokens) -> None:
+    """Remember how many tokens a request carried beyond its conversation."""
+    global _last_prompt_overhead
+    try:
+        overhead = int(request_tokens) - int(conversation_tokens)
+    except (TypeError, ValueError):
+        return
+    if int(request_tokens) <= 0 or overhead <= 0:
+        return
+    _last_prompt_overhead = overhead
+    if not session_id:
+        return
+    samples = _prompt_overhead.pop(session_id, None) or deque(maxlen=_OVERHEAD_SAMPLES)
+    samples.append(overhead)
+    _prompt_overhead[session_id] = samples
+    while len(_prompt_overhead) > _OVERHEAD_SESSIONS:
+        _prompt_overhead.popitem(last=False)
+
+
+def prompt_overhead_tokens(session_id: Optional[str] = None) -> int:
+    """Expected overhead for a session's next request.
+
+    The smallest recent sample: a turn whose final request also carried this
+    turn's tool output overstates it. Falls back to the last overhead seen in
+    any session (it is mostly the same prompt), so a long chat reopened after
+    a restart is still judged with it.
+    """
+    samples = _prompt_overhead.get(session_id) if session_id else None
+    return min(samples) if samples else _last_prompt_overhead
 
 
 def auto_compact_threshold_percent() -> int:
@@ -493,14 +542,16 @@ async def maybe_compact(
     if context_length is None:
         context_length = get_context_length(endpoint_url, model)
     used = estimate_tokens(messages)
-    pct = (used / context_length) * 100 if context_length else 0
+    overhead = prompt_overhead_tokens(getattr(session, "id", None))
+    pct = ((used + overhead) / context_length) * 100 if context_length else 0
     threshold = auto_compact_threshold_percent()
 
     if pct < threshold:
         return messages, context_length, False
 
     logger.info(
-        f"Context at {pct:.1f}% ({used}/{context_length} tokens, threshold={threshold}%) — compacting"
+        f"Context at {pct:.1f}% ({used} conversation + {overhead} prompt overhead / "
+        f"{context_length} tokens, threshold={threshold}%) — compacting"
     )
 
     if deterministic:
