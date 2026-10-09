@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
+from src.ollama_context_variants import served_model, served_model_async
 from src.model_profiles import is_odysseus_merged_tools_model
 from urllib.parse import urlparse
 
@@ -2341,6 +2342,9 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         _apply_deepseek_v4_reasoning_defaults(
             payload, target_url, model, thinking_mode
         )
+        # A per-model context window on a local Ollama's /v1 is applied by
+        # sending a derived model (see src/ollama_context_variants.py).
+        payload["model"] = served_model(url, model)
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
     try:
@@ -2740,6 +2744,9 @@ async def llm_call_async(
         _apply_deepseek_v4_reasoning_defaults(
             payload, target_url, model, thinking_mode
         )
+        # A per-model context window on a local Ollama's /v1 is applied by
+        # sending a derived model (see src/ollama_context_variants.py).
+        payload["model"] = await served_model_async(url, model)
 
     if _is_host_dead(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
@@ -3016,6 +3023,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _apply_deepseek_v4_reasoning_defaults(
             payload, target_url, model, thinking_mode
         )
+        # A per-model context window on a local Ollama's /v1 is applied by
+        # sending a derived model (see src/ollama_context_variants.py).
+        payload["model"] = await served_model_async(url, model)
         _scrub_openai_chat_tool_reasoning(payload, target_url, model)
         h = _provider_headers(provider, headers)
         if provider == "copilot":

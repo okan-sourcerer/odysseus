@@ -6,9 +6,11 @@ Provides token estimation for context usage tracking.
 """
 
 import ipaddress
+import json
 import logging
 import re
 import sys
+import time
 from typing import Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
@@ -86,6 +88,59 @@ def _configured_endpoint_kind(url: str) -> Optional[str]:
             db.close()
     except Exception:
         return None
+
+
+# Bounds for a per-model context window chosen in Settings.
+MIN_CONTEXT_WINDOW = 512
+MAX_CONTEXT_WINDOW = 2_097_152
+
+
+def parse_context_windows(raw) -> Dict[str, int]:
+    """Parse an endpoint's ``model_context_windows`` JSON into {model: tokens}.
+
+    Invalid or out-of-range entries are dropped.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    windows: Dict[str, int] = {}
+    for model_id, value in raw.items():
+        model_id = str(model_id or "").strip()
+        if not model_id or isinstance(value, bool):
+            continue
+        try:
+            tokens = int(value)
+        except (TypeError, ValueError):
+            continue
+        if MIN_CONTEXT_WINDOW <= tokens <= MAX_CONTEXT_WINDOW:
+            windows[model_id] = tokens
+    return windows
+
+
+def configured_context_window(url: str, model: str) -> int:
+    """Context window the admin set for ``model`` on this endpoint, or 0."""
+    target = _normalize_base_for_compare(url)
+    if not target or not model or "core.database" not in sys.modules:
+        return 0
+    try:
+        from core.database import SessionLocal, ModelEndpoint
+        db = SessionLocal()
+        try:
+            rows = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+            for ep in rows:
+                base = _normalize_base_for_compare(getattr(ep, "base_url", "") or "")
+                if not base or (target != base and not target.startswith(base + "/")):
+                    continue
+                return parse_context_windows(getattr(ep, "model_context_windows", None)).get(model, 0)
+        finally:
+            db.close()
+    except Exception:
+        return 0
+    return 0
 
 
 def is_local_endpoint(url: str) -> bool:
@@ -242,11 +297,47 @@ KNOWN_CONTEXT_WINDOWS = {
 # Cache
 # ---------------------------------------------------------------------------
 _context_cache: Dict[Tuple[str, str], Tuple[int, bool]] = {}
+# (server root, variant) -> time the derived Ollama model could not be created.
+# Until a retry succeeds, the setting only caps what Ollama reports instead of
+# being applied.
+_ollama_variant_failures: Dict[Tuple[str, str], float] = {}
+OLLAMA_VARIANT_RETRY_SECONDS = 60.0
+
+
+def ollama_variant_failed(endpoint_url: str, variant: str) -> bool:
+    failed_at = _ollama_variant_failures.get((ollama_api_root(endpoint_url), variant))
+    return failed_at is not None and time.monotonic() - failed_at < OLLAMA_VARIANT_RETRY_SECONDS
+
+
+def controls_ollama_window(endpoint_url: str, model: str, configured: Optional[int] = None) -> bool:
+    """Whether Odysseus makes a local Ollama load ``model`` with its configured
+    window (a derived model on /v1, ``options.num_ctx`` on the native API)."""
+    if configured is None:
+        configured = configured_context_window(endpoint_url, model)
+    if not configured or not is_local_ollama_endpoint(endpoint_url):
+        return False
+    return not ollama_variant_failed(endpoint_url, ollama_context_variant(model, configured))
 
 
 def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Return (context_length, known). ``known`` is False only when the value is a
-    bare DEFAULT_CONTEXT fallback (no endpoint report and not in the known table)."""
+    bare DEFAULT_CONTEXT fallback (no endpoint report and not in the known table).
+
+    A window set for the model in Settings wins where Odysseus controls the
+    window (a local Ollama); elsewhere it caps the discovered window, since
+    Odysseus cannot make that server serve more.
+    """
+    configured = configured_context_window(endpoint_url, model)
+    if configured and controls_ollama_window(endpoint_url, model, configured):
+        return configured, True
+    ctx, known = _discover_context_length(endpoint_url, model)
+    if configured:
+        return (min(ctx, configured) if known else configured), True
+    return ctx, known
+
+
+def _discover_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
+    """Discovered (context_length, known), cached for remote endpoints."""
     configured_kind = _configured_endpoint_kind(endpoint_url)
     # A local Ollama reloads models with other windows; never pin its answer,
     # even when the endpoint is stored as endpoint_kind="api".
@@ -385,6 +476,29 @@ def looks_like_ollama(endpoint_url: str) -> bool:
     except ValueError:
         return False
     return port == OLLAMA_DEFAULT_PORT or "ollama" in (parsed.hostname or "").lower()
+
+
+_OLLAMA_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+OLLAMA_VARIANT_NAMESPACE = "odysseus"
+
+
+def ollama_context_variant(model: str, num_ctx: int) -> str:
+    """Name of the derived Ollama model that loads ``model`` with ``num_ctx``.
+
+    Ollama's /v1 API ignores ``num_ctx``, so a per-model window is applied
+    through a model created FROM the original with that one parameter. It
+    shares the original's weights (no extra disk). The ``odysseus/``
+    namespace keeps these out of model pickers.
+    """
+    last = (model or "").strip().rsplit("/", 1)[-1]
+    name, _, tag = last.partition(":")
+    name = _OLLAMA_NAME_UNSAFE_RE.sub("-", name).strip("-.") or "model"
+    tag = _OLLAMA_NAME_UNSAFE_RE.sub("-", tag or "latest").strip("-.") or "latest"
+    return f"{OLLAMA_VARIANT_NAMESPACE}/{name}:{tag}-ctx{int(num_ctx)}"
+
+
+def is_ollama_context_variant(model_id: str) -> bool:
+    return str(model_id or "").startswith(OLLAMA_VARIANT_NAMESPACE + "/")
 
 
 _KIND_UNSET = object()
