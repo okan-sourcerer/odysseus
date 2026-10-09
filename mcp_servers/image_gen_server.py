@@ -6,6 +6,8 @@ MCP server exposing image generation via OpenAI-compatible APIs.
 
 import asyncio
 import base64
+import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -19,6 +21,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.constants import GENERATED_IMAGES_DIR
 
 server = Server("image_gen")
+
+_SIZE_RE = re.compile(r"^(\d{3,4})x(\d{3,4})$")
+
+
+def _first_image_endpoint_model() -> str:
+    """First model served by an enabled dedicated image endpoint (e.g. a local
+    diffusion server added as an "Image" endpoint), or "" when there is none."""
+    from src.database import SessionLocal, ModelEndpoint
+
+    db = SessionLocal()
+    try:
+        endpoints = db.query(ModelEndpoint).filter(
+            ModelEndpoint.is_enabled == True,  # noqa: E712
+            ModelEndpoint.model_type == "image",
+        ).all()
+        for ep in endpoints:
+            try:
+                models = json.loads(ep.cached_models or "[]")
+            except (TypeError, ValueError):
+                continue
+            for model in models if isinstance(models, list) else []:
+                model_id = model.get("id") if isinstance(model, dict) else model
+                if isinstance(model_id, str) and model_id.strip():
+                    return model_id.strip()
+    finally:
+        db.close()
+    return ""
+
+
+def _local_image_size(size: str) -> str:
+    """Accept any WIDTHxHEIGHT within 256-2048 for self-hosted models (they are
+    not limited to OpenAI's fixed size list); fall back to 1024x1024."""
+    match = _SIZE_RE.match((size or "").strip())
+    if not match:
+        return "1024x1024"
+    width, height = int(match.group(1)), int(match.group(2))
+    if not (256 <= width <= 2048 and 256 <= height <= 2048):
+        return "1024x1024"
+    return f"{width}x{height}"
 
 
 @server.list_tools()
@@ -69,7 +110,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if quality == "medium" and _settings.get("image_quality"):
             quality = _settings["image_quality"]
 
-        # Auto-detect best available image model
+        # Auto-detect best available image model (same order as
+        # ai_interaction.do_generate_image: OpenAI image models, then any
+        # dedicated image endpoint such as a local diffusion server)
         if not model_spec:
             for candidate in ("gpt-image-1.5", "gpt-image-1", "dall-e-3"):
                 try:
@@ -78,6 +121,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     break
                 except ValueError:
                     continue
+            if not model_spec:
+                model_spec = await asyncio.to_thread(_first_image_endpoint_model)
             if not model_spec:
                 return [TextContent(type="text", text="Error: No image model found. Configure one in Admin.")]
 
@@ -90,6 +135,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec)
 
         is_gpt_image = "gpt-image" in model_id.lower()
+        is_dalle = "dall-e" in model_id.lower()
         base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
         images_url = base_url + "/images/generations"
 
@@ -97,11 +143,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         valid_dalle3_sizes = {"1024x1024", "1024x1792", "1792x1024"}
         if is_gpt_image and size not in valid_gpt_sizes:
             size = "1024x1024"
-        elif not is_gpt_image and size not in valid_dalle3_sizes:
+        elif is_dalle and size not in valid_dalle3_sizes:
             size = "1024x1024"
+        elif not is_gpt_image and not is_dalle:
+            size = _local_image_size(size)
 
         payload = {"model": model_id, "prompt": prompt, "n": 1, "size": size}
-        if is_gpt_image:
+        # DALL-E 3 takes standard/hd rather than these presets; every other
+        # backend (gpt-image, self-hosted diffusion servers) understands them.
+        if not is_dalle:
             payload["quality"] = quality if quality in ("low", "medium", "high", "auto") else "medium"
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
@@ -160,8 +210,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             # "Direct link:" rather than an "image_url:" label — small models copied the
             # label token ("image_url") into the link href, producing a broken link.
+            # Full prompt on one line: tool_execution._promote_image_fields
+            # parses it back out as the image card's prompt.
+            one_line_prompt = " ".join(prompt.split())
             result = (
-                f"Generated image for: {prompt[:100]}\n"
+                f"Generated image for: {one_line_prompt}\n"
                 f"Direct link: {image_url}\n"
                 f"model: {model_id}\nsize: {size}"
             )
