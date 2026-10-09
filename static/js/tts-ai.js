@@ -253,6 +253,31 @@ class AITTSManager {
      * Enqueue a message for auto-play. Plays sequentially — each message
      * finishes before the next starts. Stopping any message clears the queue.
      */
+    /**
+     * Split a reply into speakable chunks: sentences grouped up to ~maxLen
+     * characters. Reading a long reply as one request meant waiting for the
+     * whole audio before hearing anything (and local voice models handle
+     * long inputs poorly); chunks start playing after the first one.
+     */
+    splitForSpeech(text, maxLen = 280) {
+        const plain = this.extractPlainText(text) || '';
+        const sentences = plain.match(/[^.!?\n]+(?:[.!?]+|\n+|$)/g) || [];
+        const chunks = [];
+        let current = '';
+        for (const raw of sentences) {
+            const sentence = raw.trim();
+            if (!sentence) continue;
+            if (current && (current.length + sentence.length + 1) > maxLen) {
+                chunks.push(current);
+                current = sentence;
+            } else {
+                current = current ? `${current} ${sentence}` : sentence;
+            }
+        }
+        if (current) chunks.push(current);
+        return chunks.length ? chunks : (plain.trim() ? [plain.trim()] : []);
+    }
+
     enqueue(text, button, resetFn) {
         this._queue.push({ text, button, resetFn });
         if (!this._processing) {
@@ -266,6 +291,13 @@ class AITTSManager {
 
         while (this._queue.length > 0) {
             const item = this._queue[0];
+            // Synthesize the next item while this one plays, so chunks of a
+            // reply follow each other without a pause for each request.
+            const next = this._queue[1];
+            if (next && !next._audio && !this.useBrowserTTS) {
+                next._audio = this.synthesize(next.text);
+                next._audio.catch(() => {});
+            }
             try {
                 await this._playQueueItem(item);
             } catch (err) {
@@ -293,7 +325,7 @@ class AITTSManager {
         try {
             if (!this._processing) return;
 
-            const audioUrl = await this.synthesize(text);
+            const audioUrl = await (item._audio || this.synthesize(text));
 
             if (!this._processing) return;
 
@@ -505,7 +537,11 @@ export function addAITTSButton(messageElement, text) {
             return;
         }
 
-        mgr.enqueue(text, playButton, resetButton);
+        // One queue item per chunk; only the last one resets the button.
+        const chunks = mgr.splitForSpeech(text);
+        chunks.forEach((chunk, i) => {
+            mgr.enqueue(chunk, playButton, i === chunks.length - 1 ? resetButton : null);
+        });
     });
 
     actions.appendChild(playButton);

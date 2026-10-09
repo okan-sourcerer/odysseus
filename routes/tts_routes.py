@@ -6,6 +6,7 @@ TTS API routes — multi-provider (local Kokoro, API endpoint, browser).
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,11 @@ def setup_tts_routes(tts_service):
                     detail={"message": "TTS service not available"}
                 )
             
+            # Synthesis is a blocking HTTP call (or local model run) that can
+            # take a while; keep it off the event loop so chat streams and
+            # other requests are not frozen meanwhile.
             if request.format == "base64":
-                audio_b64 = tts_service.synthesize_to_base64(request.text)
+                audio_b64 = await asyncio.to_thread(tts_service.synthesize_to_base64, request.text)
                 if not audio_b64:
                     raise HTTPException(
                         status_code=500,
@@ -47,7 +51,7 @@ def setup_tts_routes(tts_service):
                 return {"audio": audio_b64}
             
             else:  # audio format
-                audio_data = tts_service.synthesize(request.text)
+                audio_data = await asyncio.to_thread(tts_service.synthesize, request.text)
                 if not audio_data:
                     raise HTTPException(
                         status_code=500,
