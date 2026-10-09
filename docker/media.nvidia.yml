@@ -32,6 +32,8 @@ services:
       - --lazy-load
       - --idle-unload=${MEDIA_IDLE_UNLOAD:-120}
       - --unload-ollama=${MEDIA_OLLAMA_URL:-http://host.docker.internal:11434}
+      # The tts service may hold Chatterbox on the GPU; FLUX needs nearly all of 8 GB.
+      - --release-gpu=http://tts:8200/v1/unload
       - --host=0.0.0.0
       - --port=8100
       # Odysseus reaches it by service name on the compose network.

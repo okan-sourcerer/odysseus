@@ -104,6 +104,21 @@ def _unload_ollama() -> None:
         logger.info("Unloaded Ollama models before image job: %s", ", ".join(names))
 
 
+def _release_gpu_users() -> None:
+    """POST each --release-gpu URL (e.g. a TTS server's /v1/unload) so other
+    on-demand GPU services free their memory before an image job."""
+    urls = [u for u in (_args.release_gpu or []) if u]
+    if not urls:
+        return
+    import httpx
+
+    for url in urls:
+        try:
+            httpx.post(url, timeout=30)
+        except Exception as exc:
+            logger.info("GPU release request to %s failed (%s); continuing", url, type(exc).__name__)
+
+
 def _unload_model() -> None:
     global _pipe, _inpaint_pipe, _img2img_pipe
     _pipe = _inpaint_pipe = _img2img_pipe = None
@@ -119,6 +134,7 @@ def _enter_model_job() -> None:
     global _active_jobs
     with _model_lock:
         _unload_ollama()
+        _release_gpu_users()
         if _pipe is None and _args.lazy_load:
             load_model()
         _active_jobs += 1
@@ -1627,6 +1643,9 @@ if __name__ == "__main__":
                         help="Free the GPU after this many idle seconds (0 = keep the model loaded)")
     parser.add_argument("--unload-ollama", default="",
                         help="Ollama base URL; ask it to unload its models before each image job")
+    parser.add_argument("--release-gpu", action="append", default=[],
+                        help="URL to POST before each image job so another GPU service frees "
+                             "its memory (repeatable), e.g. http://tts:8200/v1/unload")
     parser.add_argument("--attention-slicing", action="store_true", help="Enable attention slicing")
     parser.add_argument("--vae-slicing", action="store_true", help="Enable VAE slicing")
     parser.add_argument("--harmonize-gpu", type=int, default=None, help="GPU index for harmonize/img2img (default: same as main)")
