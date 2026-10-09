@@ -21,10 +21,13 @@ sys.modules["xformers.ops"] = type(sys)("xformers.ops")
 sys.modules["xformers.ops.fmha"] = type(sys)("xformers.ops.fmha")
 
 import argparse
+import asyncio
 import base64
+import functools
 import io
 import json
 import logging
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -50,8 +53,114 @@ _PROGRESS = {}
 
 @asynccontextmanager
 async def lifespan(application):
-    load_model()
+    global _model_id, _last_used
+    _model_id = Path(_args.model).name
+    if not _args.lazy_load:
+        load_model()
+        _last_used = time.monotonic()
+    if _args.idle_unload > 0:
+        threading.Thread(target=_idle_unloader, name="idle-unload", daemon=True).start()
     yield
+
+
+# ---------------------------------------------------------------------------
+# On-demand GPU use (--lazy-load, --idle-unload, --unload-ollama)
+# ---------------------------------------------------------------------------
+# On a small GPU shared with a local LLM, holding the image model all day
+# starves the LLM. With these options the model loads on first use (after
+# asking Ollama to free its VRAM) and is released after a quiet period.
+
+_model_lock = threading.RLock()
+_active_jobs = 0
+_last_used = 0.0
+
+
+def _unload_ollama() -> None:
+    """Ask Ollama at --unload-ollama to unload its models before a job."""
+    base = (_args.unload_ollama or "").rstrip("/")
+    if not base:
+        return
+    import httpx
+
+    try:
+        loaded = httpx.get(f"{base}/api/ps", timeout=5).json().get("models") or []
+    except Exception as exc:
+        logger.info("Ollama not reachable (%s); not unloading it", type(exc).__name__)
+        return
+    names = [m.get("name") or m.get("model") for m in loaded if m.get("name") or m.get("model")]
+    for name in names:
+        try:
+            httpx.post(f"{base}/api/generate", json={"model": name, "keep_alive": 0}, timeout=30)
+        except Exception as exc:
+            logger.warning("Unloading Ollama model %s failed: %s", name, exc)
+    for _ in range(20):
+        try:
+            if not httpx.get(f"{base}/api/ps", timeout=5).json().get("models"):
+                break
+        except Exception:
+            break
+        time.sleep(0.5)
+    if names:
+        logger.info("Unloaded Ollama models before image job: %s", ", ".join(names))
+
+
+def _unload_model() -> None:
+    global _pipe, _inpaint_pipe, _img2img_pipe
+    _pipe = _inpaint_pipe = _img2img_pipe = None
+    import gc
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _enter_model_job() -> None:
+    global _active_jobs
+    with _model_lock:
+        _unload_ollama()
+        if _pipe is None and _args.lazy_load:
+            load_model()
+        _active_jobs += 1
+
+
+def _exit_model_job() -> None:
+    global _active_jobs, _last_used
+    with _model_lock:
+        _active_jobs -= 1
+        _last_used = time.monotonic()
+
+
+def _uses_model(fn):
+    """Endpoint decorator: load the model if needed and keep it resident
+    (no idle unload) until the request finishes."""
+    if asyncio.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            await asyncio.to_thread(_enter_model_job)
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                _exit_model_job()
+    else:
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            _enter_model_job()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _exit_model_job()
+    return wrapper
+
+
+def _idle_unloader() -> None:
+    while True:
+        time.sleep(min(15.0, max(1.0, _args.idle_unload / 4)))
+        with _model_lock:
+            if (_pipe is not None and not _active_jobs
+                    and time.monotonic() - _last_used >= _args.idle_unload):
+                _unload_model()
+                logger.info("Unloaded %s after %ss idle", _model_id, _args.idle_unload)
 
 
 app = FastAPI(title="Diffusion Server", lifespan=lifespan)
@@ -713,6 +822,7 @@ def list_models():
 
 
 @app.post("/v1/images/generations")
+@_uses_model
 def generate_image(req: ImageRequest):
     if _pipe is None:
         return {"error": "Model not loaded"}
@@ -785,6 +895,7 @@ def image_progress(request_id: str):
 
 
 @app.post("/v1/images/edits")
+@_uses_model
 async def edit_image(
     prompt: str = Form(...),
     image: UploadFile = File(...),
@@ -997,6 +1108,7 @@ def _get_inpaint_pipe():
 
 
 @app.post("/v1/images/inpaint")
+@_uses_model
 def inpaint_image(req: InpaintRequest):
     """Inpaint masked region. Tries: native inpaint → img2img+composite → txt2img+composite."""
     if _pipe is None:
@@ -1330,6 +1442,7 @@ def _decode_mask_b64(b64_str, target_size):
 
 
 @app.post("/v1/images/harmonize")
+@_uses_model
 def harmonize_image(req: HarmonizeRequest):
     """Two-stage layer harmonization.
 
@@ -1485,7 +1598,7 @@ def _legacy_whole_image_harmonize(req, source_full):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": _model_id}
+    return {"status": "ok", "model": _model_id, "loaded": _pipe is not None}
 
 
 if __name__ == "__main__":
@@ -1508,6 +1621,12 @@ if __name__ == "__main__":
                         help="Load large components 4-bit (nf4, needs bitsandbytes) to fit small GPUs")
     parser.add_argument("--quantize-components", default="transformer,text_encoder",
                         help="Comma-separated pipeline components to quantize with --quantize")
+    parser.add_argument("--lazy-load", action="store_true",
+                        help="Load the model on the first image request instead of at startup")
+    parser.add_argument("--idle-unload", type=float, default=0,
+                        help="Free the GPU after this many idle seconds (0 = keep the model loaded)")
+    parser.add_argument("--unload-ollama", default="",
+                        help="Ollama base URL; ask it to unload its models before each image job")
     parser.add_argument("--attention-slicing", action="store_true", help="Enable attention slicing")
     parser.add_argument("--vae-slicing", action="store_true", help="Enable VAE slicing")
     parser.add_argument("--harmonize-gpu", type=int, default=None, help="GPU index for harmonize/img2img (default: same as main)")
