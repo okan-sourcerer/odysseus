@@ -223,6 +223,18 @@ def test_direct_xml_can_name_only_a_request_declared_tool():
     assert strip_tool_blocks(text, additional_tool_names={"inspect_state"}) == "before\n\nafter"
 
 
+def test_bare_direct_xml_for_a_declared_tool_is_stripped():
+    # Unfenced, the call reaches the declared-XML span removal itself (which
+    # used to raise NameError and take the turn's display cleanup with it).
+    text = 'before\n<inspect_state>{"scope":"active"}</inspect_state>\nafter'
+
+    [block] = parse_tool_blocks(text, additional_tool_names={"inspect_state"})
+
+    assert block.tool_type == "inspect_state"
+    assert strip_tool_blocks(text, additional_tool_names={"inspect_state"}) == "before\n\nafter"
+    assert strip_tool_blocks(text) == text
+
+
 def test_adjacent_fences_can_name_only_a_request_declared_tool():
     text = '```bash\ninspect_state\n```\n```json\n{"scope":"active"}\n```'
 

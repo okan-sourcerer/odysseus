@@ -1636,7 +1636,13 @@ def _strip_delimited(text: str, open_re, close_re, replacement: str = "") -> str
     """Replace every ``open_re ... close_re`` span (forward-only; see
     _iter_delimited). Equivalent to ``open_re([\\s\\S]*?)close_re`` substitution
     for these delimiters, without the O(n^2) rescan on unclosed openers."""
-    spans = list(_iter_delimited(text, open_re, close_re))
+    return _strip_spans(text, _iter_delimited(text, open_re, close_re), replacement)
+
+
+def _strip_spans(text: str, spans, replacement: str = "") -> str:
+    """Replace each ``(match_start, inner_start, inner_end, match_end)`` span,
+    given in ascending, non-overlapping order, with ``replacement``."""
+    spans = list(spans)
     if not spans:
         return text
     out = []
