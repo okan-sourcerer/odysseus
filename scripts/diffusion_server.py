@@ -339,6 +339,29 @@ def _load_omnigen2_pipeline(model_path: str, torch_dtype, target_device: str, us
         return False
 
 
+def _quantization_kwargs(torch_dtype) -> dict:
+    """``from_pretrained`` kwargs for ``--quantize`` (empty when off).
+
+    nf4 loads the large components 4-bit via bitsandbytes, so e.g. FLUX.2
+    [klein] (7.8 GB transformer + 8 GB Qwen3 text encoder in bf16) fits an
+    8 GB GPU instead of falling back to slow sequential CPU offload.
+    """
+    if _args.quantize == "none":
+        return {}
+    from diffusers import PipelineQuantizationConfig
+
+    components = [c.strip() for c in _args.quantize_components.split(",") if c.strip()]
+    return {"quantization_config": PipelineQuantizationConfig(
+        quant_backend="bitsandbytes_4bit",
+        quant_kwargs={
+            "load_in_4bit": True,
+            "bnb_4bit_quant_type": "nf4",
+            "bnb_4bit_compute_dtype": torch_dtype,
+        },
+        components_to_quantize=components,
+    )}
+
+
 def load_model():
     global _pipe, _model_id
     import diffusers
@@ -353,7 +376,8 @@ def load_model():
         logger.warning("CPU offload requested but %s is the active device; using direct device placement instead", target_device)
         use_offload = False
 
-    logger.info(f"Loading model from {model_path} (dtype={_args.dtype}, offload={use_offload}, device={target_device})...")
+    logger.info(f"Loading model from {model_path} (dtype={_args.dtype}, offload={use_offload}, device={target_device}, quantize={_args.quantize})...")
+    quant_kwargs = _quantization_kwargs(torch_dtype)
 
     # Ensure HF token is available for gated repos
     _hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -418,7 +442,7 @@ def load_model():
 
         # First try normal load
         try:
-            kwargs = {"torch_dtype": torch_dtype}
+            kwargs = {"torch_dtype": torch_dtype, **quant_kwargs}
             if name == "DiffusionPipeline" and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
                 kwargs["trust_remote_code"] = True
             _pipe = cls.from_pretrained(model_path, **kwargs)
@@ -432,6 +456,7 @@ def load_model():
                         torch_dtype=torch_dtype,
                         custom_pipeline=model_path,
                         trust_remote_code=True,
+                        **quant_kwargs,
                     )
                 except Exception as e2:
                     logger.warning(f"{name} custom_pipeline retry failed: {e2}")
@@ -474,7 +499,7 @@ def load_model():
         # OOM — reload and try with CPU offload
         try:
             logger.info(f"Reloading {name} with CPU offload...")
-            kwargs = {"torch_dtype": torch_dtype}
+            kwargs = {"torch_dtype": torch_dtype, **quant_kwargs}
             if name == "DiffusionPipeline" and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
                 kwargs["trust_remote_code"] = True
             _pipe = cls.from_pretrained(model_path, **kwargs)
@@ -490,7 +515,7 @@ def load_model():
         # Last resort — sequential offload
         try:
             logger.info(f"Reloading {name} with sequential CPU offload...")
-            kwargs = {"torch_dtype": torch_dtype}
+            kwargs = {"torch_dtype": torch_dtype, **quant_kwargs}
             if name == "DiffusionPipeline" and cls_name_from_index and not hasattr(diffusers, cls_name_from_index):
                 kwargs["trust_remote_code"] = True
             _pipe = cls.from_pretrained(model_path, **kwargs)
@@ -1479,6 +1504,10 @@ if __name__ == "__main__":
     parser.add_argument("--width", type=int, default=1024, help="Default output width")
     parser.add_argument("--height", type=int, default=1024, help="Default output height")
     parser.add_argument("--cpu-offload", action="store_true", help="Enable model CPU offload")
+    parser.add_argument("--quantize", default="none", choices=["none", "nf4"],
+                        help="Load large components 4-bit (nf4, needs bitsandbytes) to fit small GPUs")
+    parser.add_argument("--quantize-components", default="transformer,text_encoder",
+                        help="Comma-separated pipeline components to quantize with --quantize")
     parser.add_argument("--attention-slicing", action="store_true", help="Enable attention slicing")
     parser.add_argument("--vae-slicing", action="store_true", help="Enable VAE slicing")
     parser.add_argument("--harmonize-gpu", type=int, default=None, help="GPU index for harmonize/img2img (default: same as main)")
