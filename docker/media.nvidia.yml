@@ -1,0 +1,57 @@
+# Media server overlay: runs the image server (scripts/diffusion_server.py)
+# as part of the Odysseus stack on an NVIDIA GPU, so it starts and stops with
+# Odysseus instead of being launched by hand. Enable it in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker/media.nvidia.yml
+# then point Odysseus' Image endpoint at http://media:8100/v1.
+#
+# Models live in the `media-models` volume (MEDIA_MODELS_DIR may name a host
+# folder instead). Prefer the volume on Docker Desktop: Windows/macOS folders
+# are bind-mounted through a slow file share (~50 MB/s measured), which turns
+# a 25 s model load into 15 minutes. Copy a model in once:
+#   docker run --rm -v /path/to/MODEL:/src:ro -v odysseus_media-models:/models \
+#     alpine cp -r /src /models/MODEL
+# The default model is FLUX.2 [klein] 4B saved already 4-bit (see
+# --quantize); for the original bf16 weights set MEDIA_QUANTIZE=nf4.
+#
+# Requires GPU passthrough (NVIDIA Container Toolkit on Linux; Docker Desktop
+# with the NVIDIA driver on Windows). The model loads on the first image
+# request and frees the GPU after MEDIA_IDLE_UNLOAD seconds without one; before
+# each job it asks Ollama (MEDIA_OLLAMA_URL) to unload, so both can share a
+# small GPU. Defaults suit FLUX.2 [klein] 4B on 8 GB.
+services:
+  media:
+    build:
+      context: .
+      dockerfile: docker/media/Dockerfile
+    image: ${MEDIA_IMAGE:-odysseus-media:local}
+    command:
+      - --model=/models/${MEDIA_IMAGE_MODEL:-FLUX.2-klein-4B-nf4}
+      - --quantize=${MEDIA_QUANTIZE:-none}
+      - --steps=${MEDIA_STEPS:-4}
+      - --guidance-scale=${MEDIA_GUIDANCE_SCALE:-1.0}
+      - --lazy-load
+      - --idle-unload=${MEDIA_IDLE_UNLOAD:-120}
+      - --unload-ollama=${MEDIA_OLLAMA_URL:-http://host.docker.internal:11434}
+      - --host=0.0.0.0
+      - --port=8100
+      # Odysseus reaches it by service name on the compose network.
+      - --allowed-host=media
+    volumes:
+      - ${MEDIA_MODELS_DIR:-media-models}:/models:ro
+      - ${MEDIA_HF_HOME:-./data/media/hf}:/hf
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  media-models:
