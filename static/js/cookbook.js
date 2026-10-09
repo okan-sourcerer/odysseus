@@ -39,6 +39,7 @@ import { topPortalZ } from './toolWindowZOrder.js';
 const STORAGE_KEY = 'cookbook-presets';
 const LAST_STATE_KEY = 'cookbook-last-state';
 const SERVE_STATE_KEY = 'cookbook-serve-state';
+const SERVE_FAVORITES_KEY = 'cookbook-serve-favorite-models';
 let _dependenciesFetchId = 0;
 let _dependenciesRequestController = null;
 let _dependenciesModelHint = '';

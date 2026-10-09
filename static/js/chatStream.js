@@ -7,7 +7,7 @@ import Storage from './storage.js';
 import themeModule from './theme.js?v=20260911organsrain1';
 import markdownModule from './markdown.js';
 import sessionModule from './sessions.js';
-import documentModule from './document.js?v=20260916docctx2';
+import documentModule from './document.js?v=20261009undefnames1';
 
 // Tool approvals are control-plane submits for the current chat. chat.js
 // deliberately leaves the composer untouched, then programmatically clicks the
@@ -181,7 +181,7 @@ export function handleUIControl(uiData) {
           if (fn) fn();
         }).catch(function(){});
       } else if (panel === 'gallery') {
-        import('./gallery.js?v=20260910promptcopy1').then(function(mod) {
+        import('./gallery.js?v=20261009undefnames1').then(function(mod) {
           var fn = mod.openGallery || (mod.default && mod.default.openGallery);
           if (fn) fn();
         }).catch(function(){});
@@ -208,7 +208,7 @@ export function handleUIControl(uiData) {
           if (fn) fn(uiData.view ? { tab: uiData.view } : undefined);
         }).catch(function(){});
       } else if (panel === 'notes') {
-        import('./notes.js?v=20260911notesselectioncancel1').then(function(mod) {
+        import('./notes.js?v=20261009undefnames1').then(function(mod) {
           var fn = mod.openPanel || mod.openNotes || (mod.default && (mod.default.openPanel || mod.default.openNotes));
           if (fn) fn();
         }).catch(function(){});

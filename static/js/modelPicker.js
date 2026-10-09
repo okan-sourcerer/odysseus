@@ -422,6 +422,9 @@ function _initModelPickerDropdown() {
     }
     return _providerSlug((m && m.mid) || '');
   }
+  function _providerDisplayName(slug) {
+    return _PROVIDER_NAMES[slug] || slug.charAt(0).toUpperCase() + slug.slice(1).replace(/-/g, ' ');
+  }
   function _providerGroupName(provider) {
     if (String(provider || '').startsWith('~endpoint:')) {
       const raw = String(provider).slice('~endpoint:'.length);

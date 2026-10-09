@@ -172,5 +172,5 @@ export function createHistoryPanel({ undo, redo }) {
     if (cur) cur.scrollIntoView({ block: 'center' });
   }
 
-  return { toggleHistoryPanel, refreshHistoryPanelIfOpen, jumpToHistory };
+  return { toggleHistoryPanel, closeHistoryPanel, refreshHistoryPanelIfOpen, jumpToHistory };
 }

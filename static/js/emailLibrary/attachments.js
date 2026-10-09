@@ -9,6 +9,7 @@
 // are, so the chips are rendered late and the card icon repaired afterwards.
 
 import spinnerModule from '../spinner.js';
+import { showToast } from '../ui.js?v=20260916largetoolscroll1';
 import * as Modals from '../modalManager.js';
 import { state } from './state.js';
 import { _esc } from './utils.js';
@@ -71,7 +72,7 @@ function _wireAttachmentHandlers(reader, folder) {
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-        try { uiModule.showToast && uiModule.showToast(`Downloading ${count || 'all'} attachments`); } catch (_) {}
+        try { showToast(`Downloading ${count || 'all'} attachments`); } catch (_) {}
       } catch (e) {
         console.error('attachments zip download error', e);
         try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError('Could not download attachments'); } catch (_) {}
@@ -121,7 +122,7 @@ function _wireAttachmentHandlers(reader, folder) {
         if (existingEventUid && Number(result.imported || 0) === 0 && Number(result.skipped || 0) > 0) {
           _openCalendarEventFromEmail(existingEventUid);
         }
-        try { uiModule.showToast && uiModule.showToast(`${result.imported || 0} event${result.imported === 1 ? '' : 's'} added to ${result.calendar || 'calendar'}`); } catch (_) {}
+        try { showToast(`${result.imported || 0} event${result.imported === 1 ? '' : 's'} added to ${result.calendar || 'calendar'}`); } catch (_) {}
         window.dispatchEvent(new CustomEvent('calendar-refresh'));
       } catch (e) {
         console.error('calendar attachment import failed', e);
@@ -187,7 +188,7 @@ function _wireAttachmentHandlers(reader, folder) {
               ownerModal.classList.add('hidden');
             }
           }
-          const docMod = await import('../document.js?v=20260916docctx2');
+          const docMod = await import('../document.js?v=20261009undefnames1');
           const load = (docMod && docMod.loadDocument) || (docMod && docMod.default && docMod.default.loadDocument);
           if (typeof load === 'function') {
             await load(json.doc_id);

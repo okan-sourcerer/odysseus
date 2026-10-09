@@ -3,7 +3,7 @@
  */
 
 import uiModule from './ui.js?v=20260916largetoolscroll1';
-import { loadPanel } from './panels.js?v=20260909movepicklayer1';
+import { loadPanel } from './panels.js?v=20261009undefnames1';
 import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';

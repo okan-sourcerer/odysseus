@@ -6043,7 +6043,7 @@ export async function _translateEmail(reader, language, opts = {}) {
   const targetLanguage = language || 'English';
   const sourceText = _emailBodyTextForTranslate(reader);
   if (!sourceText) {
-    try { uiModule?.showError?.('No email body to translate'); } catch {}
+    try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError('No email body to translate'); } catch {}
     return;
   }
 
@@ -6094,12 +6094,12 @@ export async function _translateEmail(reader, language, opts = {}) {
         .trim();
     } else {
       panel.remove();
-      try { uiModule?.showError?.(result.error || 'Failed to translate'); } catch {}
+      try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError(result.error || 'Failed to translate'); } catch {}
     }
   } catch (_) {
     sp.destroy();
     panel.remove();
-    try { uiModule?.showError?.('Failed to translate'); } catch {}
+    try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError('Failed to translate'); } catch {}
   }
 }
 

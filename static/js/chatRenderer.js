@@ -10,7 +10,7 @@ import { providerLogo, providerLabel } from './providers.js';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
-import { loadPanel } from './panels.js?v=20260909movepicklayer1';
+import { loadPanel } from './panels.js?v=20261009undefnames1';
 import { matchModelKey } from './model/matchKey.js';
 import { getTools } from './appConfig.js';
 import { getShowPersonaName } from './presets.js?v=20260908personaname1';
@@ -1841,7 +1841,7 @@ function _activateEntityAnchor(e, forcedAnchor = null) {
     } else if (panel === 'skills') {
       document.getElementById('tool-skills-btn')?.click();
     } else if (panel === 'research') {
-        import('./research/panel.js?v=20260913researchrailerrors1').then(mod => {
+        import('./research/panel.js?v=20261009undefnames1').then(mod => {
         const open = mod.openPanel || (mod.default && mod.default.openPanel);
         if (open) open();
       }).catch(() => {});
@@ -1889,14 +1889,14 @@ function _activateEntityAnchor(e, forcedAnchor = null) {
       } catch {}
     });
   } else if (kind === 'document') {
-    import('./document.js?v=20260916docctx2').then(mod => {
+    import('./document.js?v=20261009undefnames1').then(mod => {
       const open = mod.loadDocument
         || mod.openDocument
         || (mod.default && (mod.default.loadDocument || mod.default.openDocument));
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'note') {
-      import('./notes.js?v=20260911notesselectioncancel1').then(mod => {
+      import('./notes.js?v=20261009undefnames1').then(mod => {
       const open = mod.openNote || (mod.default && mod.default.openNote);
       if (open) open(id);
       try {
@@ -1911,7 +1911,7 @@ function _activateEntityAnchor(e, forcedAnchor = null) {
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'image') {
-    import('./gallery.js?v=20260910promptcopy1').then(mod => {
+    import('./gallery.js?v=20261009undefnames1').then(mod => {
       const open = mod.openGalleryImage || (mod.default && mod.default.openGalleryImage);
       if (open) open(id);
     }).catch(() => {});
@@ -1946,7 +1946,7 @@ function _activateEntityAnchor(e, forcedAnchor = null) {
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'research') {
-    import('./research/panel.js?v=20260913researchrailerrors1').then(mod => {
+    import('./research/panel.js?v=20261009undefnames1').then(mod => {
       const open = mod.openPanel || (mod.default && mod.default.openPanel);
       if (open) open(id);
     }).catch(() => {});
@@ -2132,7 +2132,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     e.stopPropagation();
     try {
       const [galleryMod, editorMod] = await Promise.all([
-        import('./gallery.js?v=20260910promptcopy1'),
+        import('./gallery.js?v=20261009undefnames1'),
         loadPanel('editor'),
       ]);
       // Ensure the Gallery modal is open so the editor has a container
@@ -2166,7 +2166,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     galleryBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
-        const mod = await import('./gallery.js?v=20260910promptcopy1');
+        const mod = await import('./gallery.js?v=20261009undefnames1');
         const open = mod.openGalleryImage || (mod.default && mod.default.openGalleryImage);
         if (open) open(imageId);
       } catch (err) {
@@ -3656,7 +3656,7 @@ export function addMessage(role, content, modelName, metadata) {
 
       b.querySelectorAll('[data-doc-edit-ref]').forEach(button => {
         button.addEventListener('click', () => {
-          import('./document.js?v=20260916docctx2').then(mod => {
+          import('./document.js?v=20261009undefnames1').then(mod => {
             const restore = mod.restoreSelectionReference
               || mod.default?.restoreSelectionReference;
             return restore?.(button.dataset.docEditRef || '', {

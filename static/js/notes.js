@@ -4,7 +4,7 @@
  */
 
 import uiModule from './ui.js?v=20260916largetoolscroll1';
-import { spawnConfetti } from './compare/vote.js?v=20260828resendcaldrag1';
+import { spawnConfetti } from './compare/vote.js?v=20261009undefnames1';
 import * as Modals from './modalManager.js';
 import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
 import { makeWindowDraggable } from './windowDrag.js';

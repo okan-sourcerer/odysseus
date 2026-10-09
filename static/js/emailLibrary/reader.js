@@ -662,7 +662,7 @@ async function _generateSummary(reader, data, btn) {
   } catch (e) {
     sp.destroy();
     _renderEmailSummaryError(content, null);
-    if (uiModule) uiModule.showError?.('Failed to summarize');
+    try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError('Failed to summarize'); } catch (_) {}
   } finally {
     if (btn) btn.disabled = false;
   }
