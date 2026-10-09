@@ -7,9 +7,10 @@ Terminal metrics report that stored resolution; they never start discovery.
 Evidence classes are kept apart instead of being folded into one "known" flag:
 
 * ``runtime_confirmed``: the serving process reported its active window
-  (llama.cpp ``/slots`` or ``/props``) or rejected a request of this turn with
-  an explicit limit.
-* ``provider_advertised``: the provider's model catalog lists a window.
+  (llama.cpp ``/slots`` or ``/props``, Ollama ``/api/ps`` for a loaded model)
+  or rejected a request of this turn with an explicit limit.
+* ``provider_advertised``: the provider's model catalog lists a window, or an
+  Ollama Modelfile sets the ``num_ctx`` a not-yet-loaded model will load with.
 * ``operator_declared``: the client or operator declared a transport window.
   It caps runtime or provider evidence and replaces weaker evidence.
 * ``known_table``: the static ``KNOWN_CONTEXT_WINDOWS`` fallback.
@@ -293,8 +294,17 @@ def _serving_base(endpoint_url: str) -> str:
 
 
 async def _get_json(client, url, headers, errors, label):
+    return await _read_json(client.get(url, headers=headers), errors, label)
+
+
+async def _post_json(client, url, headers, body, errors, label):
+    return await _read_json(client.post(url, headers=headers, json=body), errors, label)
+
+
+async def _read_json(request, errors, label):
+    """Await one metadata request; failures become short error codes."""
     try:
-        response = await client.get(url, headers=headers)
+        response = await request
     except httpx.TimeoutException:
         errors.append(f"{label}:timeout")
         return None
@@ -318,7 +328,77 @@ def _positive_int(value) -> int:
     return int(value)
 
 
-async def _probe(endpoint_url, model, headers, is_local, observations, errors, timeout):
+async def _probe_llamacpp(client, endpoint_url, headers, trusted, observations, errors) -> None:
+    base = _serving_base(endpoint_url)
+    slots = await _get_json(
+        client, f"{base}/slots", _probe_headers(trusted, f"{base}/slots", headers),
+        errors, "slots",
+    )
+    n_ctx = _positive_int(slots[0].get("n_ctx")) if (
+        isinstance(slots, list) and slots and isinstance(slots[0], dict)
+    ) else 0
+    if not n_ctx:
+        props = await _get_json(
+            client, f"{base}/props", _probe_headers(trusted, f"{base}/props", headers),
+            errors, "props",
+        )
+        generation = props.get("default_generation_settings") if isinstance(props, dict) else None
+        n_ctx = _positive_int(generation.get("n_ctx")) if isinstance(generation, dict) else 0
+        source = "llamacpp_props"
+    else:
+        source = "llamacpp_slots"
+    if n_ctx:
+        observations.append(
+            ContextObservation(ContextEvidence.RUNTIME_CONFIRMED, n_ctx, source)
+        )
+
+
+async def _probe_ollama(client, endpoint_url, model, headers, trusted, observations, errors) -> bool:
+    """Ollama's own report of its window. Returns whether the server is Ollama.
+
+    ``/api/ps`` lists loaded models with the window they were loaded with
+    (runtime confirmed). For a model that is not loaded, a Modelfile
+    ``num_ctx`` from ``/api/show`` is the window it will load with, else the
+    window it was last seen loaded with.
+    """
+    from src.model_context import (
+        last_ollama_window, ollama_api_root, ollama_modelfile_num_ctx, ollama_ps_context,
+        remember_ollama_window,
+    )
+
+    root = ollama_api_root(endpoint_url)
+    if not root:
+        return False
+    ps_url = f"{root}/api/ps"
+    payload = await _get_json(
+        client, ps_url, _probe_headers(trusted, ps_url, headers), errors, "ollama_ps",
+    )
+    is_ollama, n_ctx = ollama_ps_context(payload, model)
+    if not is_ollama:
+        return False
+    if n_ctx:
+        remember_ollama_window(endpoint_url, model, n_ctx)
+        observations.append(
+            ContextObservation(ContextEvidence.RUNTIME_CONFIRMED, n_ctx, "ollama_ps")
+        )
+        return True
+    show_url = f"{root}/api/show"
+    shown = await _post_json(
+        client, show_url, _probe_headers(trusted, show_url, headers), {"model": model},
+        errors, "ollama_show",
+    )
+    n_ctx = ollama_modelfile_num_ctx(shown)
+    source = "ollama_modelfile"
+    if not n_ctx:
+        n_ctx, source = last_ollama_window(endpoint_url, model), "ollama_last_loaded"
+    if n_ctx:
+        observations.append(
+            ContextObservation(ContextEvidence.PROVIDER_ADVERTISED, n_ctx, source)
+        )
+    return True
+
+
+async def _probe(endpoint_url, model, headers, is_local, is_ollama_target, observations, errors, timeout):
     from src.copilot import is_copilot_base
     from src.model_context import _model_ctx_from_entry
 
@@ -326,29 +406,16 @@ async def _probe(endpoint_url, model, headers, is_local, observations, errors, t
     # form of that same endpoint the server-owned resolver produced.
     trusted = {_origin(endpoint_url)}
     async with _http_client(timeout) as client:
-        if is_local:
-            base = _serving_base(endpoint_url)
-            slots = await _get_json(
-                client, f"{base}/slots", _probe_headers(trusted, f"{base}/slots", headers),
-                errors, "slots",
+        # A local Ollama is asked even when the endpoint is stored as
+        # endpoint_kind="api" (issue #5193); once it answered, the llama.cpp
+        # probes are skipped.
+        is_ollama = False
+        if is_ollama_target:
+            is_ollama = await _probe_ollama(
+                client, endpoint_url, model, headers, trusted, observations, errors,
             )
-            n_ctx = _positive_int(slots[0].get("n_ctx")) if (
-                isinstance(slots, list) and slots and isinstance(slots[0], dict)
-            ) else 0
-            if not n_ctx:
-                props = await _get_json(
-                    client, f"{base}/props", _probe_headers(trusted, f"{base}/props", headers),
-                    errors, "props",
-                )
-                generation = props.get("default_generation_settings") if isinstance(props, dict) else None
-                n_ctx = _positive_int(generation.get("n_ctx")) if isinstance(generation, dict) else 0
-                source = "llamacpp_props"
-            else:
-                source = "llamacpp_slots"
-            if n_ctx:
-                observations.append(
-                    ContextObservation(ContextEvidence.RUNTIME_CONFIRMED, n_ctx, source)
-                )
+        if is_local and not is_ollama:
+            await _probe_llamacpp(client, endpoint_url, headers, trusted, observations, errors)
 
         # Copilot's catalog needs headers this layer does not own; an
         # unauthenticated probe only fails. Its models are table-covered.
@@ -396,6 +463,7 @@ async def probe_provider_context(
     headers: Optional[Mapping[str, Any]] = None,
     deadline_seconds: float = PROBE_DEADLINE_SECONDS,
     is_local: Optional[bool] = None,
+    is_ollama_target: Optional[bool] = None,
 ) -> _ProbeResult:
     """Query provider metadata once, bounded by ``deadline_seconds``.
 
@@ -406,10 +474,15 @@ async def probe_provider_context(
     errors: list[str] = []
     if is_local is None:
         is_local = await _is_local(endpoint_url)
+    if is_ollama_target is None:
+        is_ollama_target = await _is_local_ollama(endpoint_url)
     timeout = max(0.1, float(deadline_seconds))
     try:
         await asyncio.wait_for(
-            _probe(endpoint_url, model, headers, is_local, observations, errors, timeout),
+            _probe(
+                endpoint_url, model, headers, is_local, is_ollama_target,
+                observations, errors, timeout,
+            ),
             timeout=timeout,
         )
     except asyncio.TimeoutError:
@@ -434,19 +507,33 @@ async def _is_local(endpoint_url: str) -> bool:
 
 async def _cached_probe(endpoint_url, model, headers, deadline_seconds, clock):
     is_local = await _is_local(endpoint_url)
+    is_ollama_target = await _is_local_ollama(endpoint_url)
+    # A local Ollama reloads models with other windows, so like other local
+    # servers it is always re-probed, whatever its endpoint_kind.
+    dynamic = is_local or is_ollama_target
     key = (endpoint_url, model, _auth_fingerprint(headers))
-    if not is_local:
+    if not dynamic:
         cached = _probe_cache.get(key)
         if cached and cached[0] > clock():
             return cached[1], True
     result = await probe_provider_context(
         endpoint_url, model, headers=headers, deadline_seconds=deadline_seconds,
-        is_local=is_local,
+        is_local=is_local, is_ollama_target=is_ollama_target,
     )
-    if not is_local:
+    if not dynamic:
         ttl = PROBE_CACHE_TTL_SECONDS if result.observations else PROBE_FAILURE_TTL_SECONDS
         _probe_cache[key] = (clock() + ttl, result)
     return result, False
+
+
+async def _is_local_ollama(endpoint_url: str) -> bool:
+    from src.model_context import is_local_ollama_endpoint
+
+    try:
+        # Same thread rule as _is_local: reads configured endpoints.
+        return bool(is_local_ollama_endpoint(endpoint_url))
+    except Exception:
+        return False
 
 
 def declared_context_window(client_runtime_context: Any) -> int:

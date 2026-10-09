@@ -115,6 +115,14 @@ class _FakeNetwork:
                         return response
                 return _Response(404, None)
 
+            async def post(self, url, headers=None, json=None):
+                network.calls.append(("post", url, dict(headers or {})))
+                network.requests.append(json)
+                for suffix, response in network.routes.items():
+                    if url.endswith(suffix):
+                        return response
+                return _Response(404, None)
+
             def stream(self, method, url, headers=None, json=None):
                 network.calls.append(("stream", url, dict(headers or {})))
                 network.requests.append(json)
@@ -128,6 +136,7 @@ class _FakeNetwork:
 @pytest.fixture(autouse=True)
 def _fresh_cache(monkeypatch):
     cr.clear_probe_cache()
+    monkeypatch.setattr(model_context, "_ollama_last_loaded", {})
     monkeypatch.setattr(model_context, "is_local_endpoint", lambda url: "127.0.0.1" in url)
     # The real URL builder may resolve hosts; these tests stay off the network.
     monkeypatch.setattr(
@@ -371,6 +380,103 @@ async def test_local_runtime_confirmed_props_when_slots_disabled(monkeypatch):
     resolution = await resolve_effective_context(LOCAL, "local-model")
     assert (resolution.effective, resolution.source) == (8192, "llamacpp_props")
     assert not resolution.mismatch
+
+
+OLLAMA = "http://127.0.0.1:11434/v1/chat/completions"
+
+
+def _ollama_ps(*models):
+    return _Response(200, {"models": [
+        {"name": name, "model": name, "context_length": ctx} for name, ctx in models
+    ]})
+
+
+@pytest.mark.asyncio
+async def test_ollama_loaded_model_window_beats_the_name_table(monkeypatch):
+    # qwen3.5 matches the "qwen3" table key (131072); Ollama serves 16384.
+    network = _install(monkeypatch, _FakeNetwork({
+        "/api/ps": _ollama_ps(("qwen3.5:9b", 16384)),
+        "/models": _catalog("qwen3.5:9b"),
+    }))
+    resolution = await resolve_effective_context(OLLAMA, "qwen3.5:9b")
+    assert (resolution.effective, resolution.evidence, resolution.source) == (
+        16384, ContextEvidence.RUNTIME_CONFIRMED, "ollama_ps",
+    )
+    assert resolution.mismatch
+    paths = [url.split("11434", 1)[1] for _, url, _ in network.calls]
+    assert paths == ["/api/ps", "/v1/models"]  # no llama.cpp probes for Ollama
+
+
+@pytest.mark.asyncio
+async def test_ollama_unloaded_model_uses_modelfile_num_ctx(monkeypatch):
+    network = _install(monkeypatch, _FakeNetwork({
+        "/api/ps": _ollama_ps(),
+        "/api/show": _Response(200, {
+            "parameters": "temperature 1\nnum_ctx 32768\ntop_k 20",
+            "model_info": {"qwen35.context_length": 262144},
+        }),
+    }))
+    resolution = await resolve_effective_context(OLLAMA, "qwen3.5:9b")
+    assert (resolution.effective, resolution.evidence, resolution.source) == (
+        32768, ContextEvidence.PROVIDER_ADVERTISED, "ollama_modelfile",
+    )
+    assert {"model": "qwen3.5:9b"} in network.requests
+
+
+@pytest.mark.asyncio
+async def test_ollama_unloaded_without_num_ctx_ignores_the_trained_maximum(monkeypatch):
+    _install(monkeypatch, _FakeNetwork({
+        "/api/ps": _ollama_ps(("other:latest", 8192)),
+        "/api/show": _Response(200, {
+            "parameters": "temperature 1",
+            "model_info": {"qwen35.context_length": 262144},
+        }),
+    }))
+    resolution = await resolve_effective_context(OLLAMA, "qwen3.5:9b")
+    assert resolution.effective != 262144
+    assert resolution.evidence == ContextEvidence.KNOWN_TABLE
+
+
+@pytest.mark.asyncio
+async def test_ollama_unloaded_model_reuses_the_window_it_was_last_loaded_with(monkeypatch):
+    # OLLAMA_KEEP_ALIVE unloads idle models; a long chat resumed later must
+    # still be budgeted against the real window, not the name table.
+    network = _install(monkeypatch, _FakeNetwork({"/api/ps": _ollama_ps(("qwen3.5:9b", 16384))}))
+    await resolve_effective_context(OLLAMA, "qwen3.5:9b")
+    network.routes["/api/ps"] = _ollama_ps()
+    network.routes["/api/show"] = _Response(200, {"parameters": "temperature 1"})
+    resolution = await resolve_effective_context(OLLAMA, "qwen3.5:9b")
+    assert (resolution.effective, resolution.evidence, resolution.source) == (
+        16384, ContextEvidence.PROVIDER_ADVERTISED, "ollama_last_loaded",
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_kind_local_ollama_is_probed_and_never_cached(monkeypatch):
+    # Manually added endpoints are stored as endpoint_kind="api" (issue #5193).
+    monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda url: "api")
+    monkeypatch.setattr(model_context, "is_local_endpoint", lambda url: False)
+    network = _install(monkeypatch, _FakeNetwork({"/api/ps": _ollama_ps(("qwen3.5:9b", 16384))}))
+    first = await resolve_effective_context(OLLAMA, "qwen3.5:9b")
+    network.routes["/api/ps"] = _ollama_ps(("qwen3.5:9b", 32768))
+    second = await resolve_effective_context(OLLAMA, "qwen3.5:9b")
+    assert (first.effective, first.source) == (16384, "ollama_ps")
+    assert (second.effective, second.cached) == (32768, False)
+    assert not any(url.endswith(("/slots", "/props")) for _, url, _ in network.calls)
+
+
+@pytest.mark.asyncio
+async def test_ollama_untagged_model_matches_latest(monkeypatch):
+    _install(monkeypatch, _FakeNetwork({"/api/ps": _ollama_ps(("llama3.2:latest", 4096))}))
+    resolution = await resolve_effective_context(OLLAMA, "llama3.2")
+    assert (resolution.effective, resolution.source) == (4096, "ollama_ps")
+
+
+@pytest.mark.asyncio
+async def test_non_ollama_local_server_gets_no_ollama_probe(monkeypatch):
+    network = _install(monkeypatch, _FakeNetwork({"/slots": _Response(200, [{"n_ctx": 4096}])}))
+    await resolve_effective_context(LOCAL, "local-model")
+    assert not any("/api/" in url for _, url, _ in network.calls)
 
 
 @pytest.mark.asyncio
