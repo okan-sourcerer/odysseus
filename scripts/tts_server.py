@@ -210,19 +210,27 @@ class _Chatterbox:
                 self._last_used = time.monotonic()
             return best, sample_rate
 
+    def unload(self) -> bool:
+        """Release the model (and its GPU memory). True if one was loaded."""
+        with self._lock:
+            if self._model is None:
+                return False
+            self._model = None
+            import gc
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            return True
+
     def _idle_loop(self):
         while True:
             time.sleep(min(15.0, max(1.0, self._idle_unload / 4)))
             with self._lock:
                 if self._model is not None and time.monotonic() - self._last_used >= self._idle_unload:
-                    self._model = None
-                    import gc
-                    gc.collect()
-                    try:
-                        import torch
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
+                    self.unload()
                     logger.info("Unloaded Chatterbox after %ss idle", self._idle_unload)
 
     @property
@@ -274,6 +282,15 @@ def speech(req: SpeechRequest):
     logger.info("%s/%s: %d chars -> %.1fs audio in %.1fs", engine, language, len(text),
                 len(audio) / sample_rate, time.time() - start)
     return Response(content=data, media_type=media_type, headers={"X-TTS-Engine": engine})
+
+
+@app.post("/v1/unload")
+def unload():
+    """Free Chatterbox's GPU memory, e.g. before an image job needs the GPU."""
+    released = _chatterbox.unload() if _chatterbox else False
+    if released:
+        logger.info("Unloaded Chatterbox on request")
+    return {"released": released}
 
 
 @app.get("/v1/models")

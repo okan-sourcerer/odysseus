@@ -16,7 +16,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "diffusion_server.py"
-_NAMES = ("_unload_ollama", "_unload_model", "_enter_model_job", "_exit_model_job", "_uses_model")
+_NAMES = ("_unload_ollama", "_release_gpu_users", "_unload_model", "_enter_model_job", "_exit_model_job",
+          "_uses_model")
 
 
 class _Resp:
@@ -44,14 +45,15 @@ class _FakeOllama:
         return _Resp({})
 
 
-def _helpers(monkeypatch, *, lazy=True, ollama_url="", ollama=None):
+def _helpers(monkeypatch, *, lazy=True, ollama_url="", ollama=None, release=()):
     tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in _NAMES]
     assert sorted(n.name for n in nodes) == sorted(_NAMES)
     if ollama is not None:
         monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(get=ollama.get, post=ollama.post))
     ns = {
-        "_args": SimpleNamespace(lazy_load=lazy, unload_ollama=ollama_url, idle_unload=30),
+        "_args": SimpleNamespace(lazy_load=lazy, unload_ollama=ollama_url, idle_unload=30,
+                                 release_gpu=list(release)),
         "_pipe": None, "_inpaint_pipe": None, "_img2img_pipe": None,
         "_model_lock": threading.RLock(), "_active_jobs": 0, "_last_used": 0.0,
         "asyncio": asyncio, "functools": functools, "time": time,
@@ -104,6 +106,25 @@ def test_no_ollama_url_means_no_ollama_calls(monkeypatch):
     assert ollama.calls == []
 
 
+def test_other_gpu_services_are_asked_to_release_before_a_job(monkeypatch):
+    posted = []
+    fake_httpx = types.SimpleNamespace(post=lambda url, timeout=None: posted.append(url))
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    ns, _ = _helpers(monkeypatch, release=["http://tts:8200/v1/unload"])
+    ns["_enter_model_job"]()
+    assert posted == ["http://tts:8200/v1/unload"]
+
+
+def test_a_failed_release_request_does_not_block_the_job(monkeypatch):
+    def boom(url, timeout=None):
+        raise ConnectionError("tts is down")
+
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(post=boom))
+    ns, loads = _helpers(monkeypatch, release=["http://tts:8200/v1/unload"])
+    ns["_enter_model_job"]()
+    assert loads == [1]
+
+
 def test_unload_model_releases_every_pipeline(monkeypatch):
     ns, _ = _helpers(monkeypatch)
     ns["_pipe"] = ns["_inpaint_pipe"] = ns["_img2img_pipe"] = object()
@@ -136,5 +157,5 @@ def test_uses_model_keeps_the_endpoint_signature_and_counts_jobs(monkeypatch):
 def test_server_wires_the_options():
     source = _SCRIPT.read_text(encoding="utf-8")
     assert source.count("@_uses_model\n") == 4  # generations, edits, inpaint, harmonize
-    for flag in ('"--lazy-load"', '"--idle-unload"', '"--unload-ollama"'):
+    for flag in ('"--lazy-load"', '"--idle-unload"', '"--unload-ollama"', '"--release-gpu"'):
         assert flag in source
