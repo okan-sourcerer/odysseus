@@ -21071,6 +21071,10 @@ async def stream_agent_loop(
 
     # Caller and credential denials remain absolute across contract routing.
     disabled_tools = set(disabled_tools or ())
+    # Same gate the text-mode prompt applies (_build_agent_prompt): with image
+    # generation off, the native generate_image schema is not offered either.
+    if not get_setting("image_gen_enabled", False):
+        disabled_tools.add("generate_image")
     if delegated_credential:
         disabled_tools.update(delegated_credential_blocked_tools())
         if tool_policy is not None:
