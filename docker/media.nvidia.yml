@@ -71,6 +71,9 @@ services:
       - --port=8200
       - --idle-unload=${TTS_IDLE_UNLOAD:-300}
       - --chatterbox-cfg=${TTS_CHATTERBOX_CFG:-0.3}
+      - --chatterbox-precision=${TTS_CHATTERBOX_PRECISION:-half}
+      # FLUX may still hold the GPU after an image; the chat model is never evicted.
+      - --release-gpu=http://media:8100/v1/unload
       - --warm-kokoro
     volumes:
       - tts-hf:/hf

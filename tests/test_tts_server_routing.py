@@ -10,9 +10,11 @@ from pathlib import Path
 import pytest
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "tts_server.py"
-_FUNCS = ("detect_language", "resolve_engine", "kokoro_voice", "max_plausible_seconds")
+_FUNCS = ("detect_language", "resolve_engine", "kokoro_voice", "max_plausible_seconds",
+          "split_for_speech")
 _CONSTS = ("_TURKISH_LETTERS", "_TURKISH_WORDS", "_WORD_RE", "MODELS", "OPENAI_VOICES",
-           "KOKORO_DEFAULT_VOICE", "CHATTERBOX_SECONDS_PER_CHAR", "CHATTERBOX_SECONDS_SLACK")
+           "KOKORO_DEFAULT_VOICE", "CHATTERBOX_SECONDS_PER_CHAR", "CHATTERBOX_SECONDS_SLACK",
+           "CHATTERBOX_CHUNK_CHARS", "_SENTENCE_RE")
 
 
 def _load():
@@ -89,3 +91,23 @@ def test_overrun_budget_only_catches_gross_overruns():
     assert budget("Bugün hava çok güzel, dışarı çıkalım mı?") >= 3.8
     # A babbling take (9.3 s for those 19 characters) is out of budget.
     assert budget("Tamam, teşekkürler!") < 9.3
+
+
+def test_long_replies_are_split_into_sentence_chunks():
+    split = NS["split_for_speech"]
+    reply = "Merhaba! Bugün hava çok güzel. " + "Uzun bir cümle daha geliyor ve oldukça uzun olacak. " * 20
+    chunks = split(reply)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 250 for chunk in chunks)
+    assert " ".join(chunks).split() == reply.split()  # nothing lost or reordered
+
+
+def test_a_sentence_longer_than_a_chunk_is_cut_at_a_space():
+    chunks = NS["split_for_speech"]("kelime " * 100)
+    assert len(chunks) > 1 and all(len(c) <= 250 for c in chunks)
+    assert " ".join(chunks).split() == ("kelime " * 100).split()
+
+
+def test_short_text_stays_one_chunk():
+    assert NS["split_for_speech"]("Tamam, teşekkürler!") == ["Tamam, teşekkürler!"]
+    assert NS["split_for_speech"]("no punctuation here") == ["no punctuation here"]
