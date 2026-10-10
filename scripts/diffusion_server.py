@@ -1612,6 +1612,19 @@ def _legacy_whole_image_harmonize(req, source_full):
     return {"image": b64, "elapsed": round(elapsed, 2)}
 
 
+@app.post("/v1/unload")
+def unload():
+    """Free the GPU for another service (e.g. a TTS model) unless a job runs."""
+    with _model_lock:
+        if _pipe is None:
+            return {"released": False, "reason": "not loaded"}
+        if _active_jobs:
+            return {"released": False, "reason": "busy"}
+        _unload_model()
+    logger.info("Unloaded %s on request", _model_id)
+    return {"released": True}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": _model_id, "loaded": _pipe is not None}

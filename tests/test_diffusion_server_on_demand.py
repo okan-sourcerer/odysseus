@@ -159,3 +159,26 @@ def test_server_wires_the_options():
     assert source.count("@_uses_model\n") == 4  # generations, edits, inpaint, harmonize
     for flag in ('"--lazy-load"', '"--idle-unload"', '"--unload-ollama"', '"--release-gpu"'):
         assert flag in source
+
+
+def _unload_endpoint(pipe, active_jobs):
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    [node] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unload"]
+    node.decorator_list = []
+    released = []
+    ns = {
+        "_model_lock": threading.RLock(), "_pipe": pipe, "_active_jobs": active_jobs,
+        "_model_id": "FLUX", "logger": logging.getLogger("test-diffusion"),
+        "_unload_model": lambda: released.append(1),
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(_SCRIPT), "exec"), ns)
+    return ns["unload"], released
+
+
+def test_unload_endpoint_frees_an_idle_model_only():
+    unload, released = _unload_endpoint(object(), 0)
+    assert unload() == {"released": True} and released == [1]
+    unload, released = _unload_endpoint(object(), 1)    # a job is running
+    assert unload()["released"] is False and released == []
+    unload, released = _unload_endpoint(None, 0)        # nothing loaded
+    assert unload()["released"] is False and released == []

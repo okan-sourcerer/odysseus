@@ -89,6 +89,41 @@ OPENAI_VOICES = {
 }
 
 
+CHATTERBOX_CHUNK_CHARS = 250
+_SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|\n+|$)")
+
+
+def split_for_speech(text: str, max_chars: int = CHATTERBOX_CHUNK_CHARS) -> list[str]:
+    """Sentences grouped into chunks of at most ~max_chars.
+
+    Chatterbox generates a bounded number of speech tokens per call (about
+    40 s of audio) and its memory grows with the input, so a whole reply in
+    one call was both cut off and, next to a loaded chat model, spilled out
+    of VRAM (a 2,153-character reply took 886 s and produced 21 s of audio).
+    """
+    chunks, current = [], ""
+    for raw in _SENTENCE_RE.findall(text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        while len(sentence) > max_chars:
+            cut = sentence.rfind(" ", 0, max_chars)
+            cut = cut if cut > 0 else max_chars
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if current and len(current) + 1 + len(sentence) > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}" if current else sentence
+    if current:
+        chunks.append(current)
+    return chunks or ([text.strip()] if text.strip() else [])
+
+
 def max_plausible_seconds(text: str) -> float:
     """Longest believable speech for ``text``; longer output means overrun."""
     return CHATTERBOX_SECONDS_SLACK + CHATTERBOX_SECONDS_PER_CHAR * len(text)
@@ -146,11 +181,15 @@ class _Kokoro:
 class _Chatterbox:
     """Chatterbox Multilingual: loaded on first use, released after idle."""
 
-    def __init__(self, voices_dir: Path, idle_unload: float, cfg_weight: float, temperature: float):
+    def __init__(self, voices_dir: Path, idle_unload: float, cfg_weight: float, temperature: float,
+                 half: bool = True, min_free_gb: float = 2.2, release_urls=()):
         self._voices_dir = voices_dir
         self._idle_unload = idle_unload
         self._cfg_weight = cfg_weight
         self._temperature = temperature
+        self._half = half
+        self._min_free_gb = min_free_gb
+        self._release_urls = list(release_urls)
         self._model = None
         self._device = None
         self._lock = threading.RLock()
@@ -158,14 +197,50 @@ class _Chatterbox:
         if idle_unload > 0:
             threading.Thread(target=self._idle_loop, name="chatterbox-idle", daemon=True).start()
 
+    def _free_gpu_gb(self) -> float:
+        import torch
+        return torch.cuda.mem_get_info()[0] / 2**30
+
+    def _gpu_has_room(self) -> bool:
+        """Whether Chatterbox fits next to what already holds the GPU.
+
+        On Windows (WSL2) an overfull GPU does not raise out-of-memory: the
+        driver silently spills to system RAM and generation slows ~100x, so
+        free memory is checked up front. Other on-demand GPU services (the
+        image server) are asked to release first; the chat model is never
+        evicted, since read-aloud runs while it streams.
+        """
+        if self._free_gpu_gb() >= self._min_free_gb:
+            return True
+        if self._release_urls:
+            import httpx
+            for url in self._release_urls:
+                try:
+                    httpx.post(url, timeout=30)
+                except Exception as exc:
+                    logger.info("GPU release request to %s failed (%s)", url, type(exc).__name__)
+            time.sleep(1)
+        free = self._free_gpu_gb()
+        if free < self._min_free_gb:
+            logger.warning("Only %.1f GB GPU memory free (need %.1f); Chatterbox uses the CPU",
+                           free, self._min_free_gb)
+        return free >= self._min_free_gb
+
     def _load(self):
         import torch
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and self._gpu_has_room():
             try:
-                logger.info("Loading Chatterbox Multilingual on cuda")
-                self._model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
+                logger.info("Loading Chatterbox Multilingual on cuda (%s)", "half" if self._half else "fp32")
+                model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
+                if self._half:
+                    # 3.2 GB -> 1.7 GB peak, which fits next to a loaded 9B
+                    # chat model on 8 GB; generation runs under autocast.
+                    model.t3.to(dtype=torch.bfloat16)
+                    model.s3gen.to(dtype=torch.float16)
+                    torch.cuda.empty_cache()
+                self._model = model
                 self._device = "cuda"
                 return
             except torch.cuda.OutOfMemoryError:
@@ -190,25 +265,40 @@ class _Chatterbox:
             if self._model is None:
                 self._load()
             sample_rate = int(self._model.sr)
-            budget = max_plausible_seconds(text)
-            best = None
+            pause = np.zeros(int(sample_rate * 0.15), dtype=np.float32)
+            pieces = []
             try:
-                for take in range(1, CHATTERBOX_MAX_TAKES + 1):
-                    wav = self._model.generate(
-                        text, language_id=language, audio_prompt_path=self._reference_clip(voice),
-                        cfg_weight=self._cfg_weight, temperature=self._temperature,
-                    )
-                    audio = wav.squeeze().detach().cpu().numpy().astype(np.float32)
-                    if best is None or len(audio) < len(best):
-                        best = audio
-                    seconds = len(audio) / sample_rate
-                    if seconds <= budget:
-                        break
-                    logger.info("Chatterbox take %d ran %.1fs for %d chars (budget %.1fs); retrying",
-                                take, seconds, len(text), budget)
+                for chunk in split_for_speech(text):
+                    if pieces:
+                        pieces.append(pause)
+                    pieces.append(self._generate_chunk(chunk, voice, language, sample_rate))
             finally:
                 self._last_used = time.monotonic()
-            return best, sample_rate
+            return np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32), sample_rate
+
+    def _generate_chunk(self, text: str, voice: str, language: str, sample_rate: int) -> np.ndarray:
+        import contextlib
+        import torch
+
+        autocast = (torch.autocast("cuda", dtype=torch.float16)
+                    if self._half and self._device == "cuda" else contextlib.nullcontext())
+        budget = max_plausible_seconds(text)
+        best = None
+        for take in range(1, CHATTERBOX_MAX_TAKES + 1):
+            with autocast:
+                wav = self._model.generate(
+                    text, language_id=language, audio_prompt_path=self._reference_clip(voice),
+                    cfg_weight=self._cfg_weight, temperature=self._temperature,
+                )
+            audio = wav.squeeze().detach().float().cpu().numpy().astype(np.float32)
+            if best is None or len(audio) < len(best):
+                best = audio
+            seconds = len(audio) / sample_rate
+            if seconds <= budget:
+                break
+            logger.info("Chatterbox take %d ran %.1fs for %d chars (budget %.1fs); retrying",
+                        take, seconds, len(text), budget)
+        return best
 
     def unload(self) -> bool:
         """Release the model (and its GPU memory). True if one was loaded."""
@@ -319,11 +409,21 @@ def main():
                         help="Chatterbox cfg_weight (lower = looser pacing)")
     parser.add_argument("--chatterbox-temperature", type=float, default=0.8,
                         help="Chatterbox sampling temperature")
+    parser.add_argument("--chatterbox-precision", default="half", choices=["half", "fp32"],
+                        help="half (bf16/fp16, ~1.7 GB peak) fits next to a loaded chat model on 8 GB")
+    parser.add_argument("--chatterbox-min-free-gb", type=float, default=2.2,
+                        help="GPU memory that must be free to load Chatterbox there (else CPU)")
+    parser.add_argument("--release-gpu", action="append", default=[],
+                        help="URL to POST to free another GPU service before loading Chatterbox "
+                             "(repeatable), e.g. http://media:8100/v1/unload")
     parser.add_argument("--warm-kokoro", action="store_true",
                         help="Load Kokoro's English pipeline at startup")
     _args = parser.parse_args()
     _chatterbox = _Chatterbox(Path(_args.voices_dir), _args.idle_unload,
-                              _args.chatterbox_cfg, _args.chatterbox_temperature)
+                              _args.chatterbox_cfg, _args.chatterbox_temperature,
+                              half=_args.chatterbox_precision == "half",
+                              min_free_gb=_args.chatterbox_min_free_gb,
+                              release_urls=_args.release_gpu)
     if _args.warm_kokoro:
         _kokoro._pipeline("a")
     uvicorn.run(app, host=_args.host, port=_args.port)
