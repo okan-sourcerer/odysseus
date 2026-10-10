@@ -52,3 +52,20 @@ def test_settings_lists_the_endpoints_own_tts_models():
     assert '<option value="local">' not in INDEX  # built-in Kokoro needs a GPU in the app container
     assert "endpointModels[ep.id] = ttsModels;" in SPEECH
     assert "fillModelOptions();" in SPEECH
+
+
+def test_synthesis_is_exempt_from_the_45s_request_cap_and_off_the_event_loop():
+    app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+    routes = (ROOT / "routes" / "tts_routes.py").read_text(encoding="utf-8")
+    exempt = app_source.split("_TIMEOUT_EXEMPT_PREFIXES = (", 1)[1].split("\n)", 1)[0]
+    assert '"/api/tts"' in exempt  # local models load on first use (~30-50 s)
+    assert "await asyncio.to_thread(tts_service.synthesize, request.text)" in routes
+    assert "await asyncio.to_thread(tts_service.synthesize_to_base64, request.text)" in routes
+
+
+def test_read_aloud_button_queues_sentence_chunks_and_prefetches():
+    tts_js = (ROOT / "static" / "js" / "tts-ai.js").read_text(encoding="utf-8")
+    assert "const chunks = mgr.splitForSpeech(text);" in tts_js
+    assert "i === chunks.length - 1 ? resetButton : null" in tts_js
+    assert "next._audio = this.synthesize(next.text);" in tts_js
+    assert "await (item._audio || this.synthesize(text))" in tts_js
